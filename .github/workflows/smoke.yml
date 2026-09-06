@@ -3,6 +3,5 @@ on: workflow_dispatch
 jobs:
   hello:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
     steps:
-      - run: echo hello-from-smoke
+      - run: echo hello-from-smoke2
