@@ -155,25 +155,21 @@ jobs:
             adb shell "chmod 755 /data/local/tmp/trace_guard" || true
             adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
             adb shell "rm -f /data/local/tmp/guard.log /data/local/tmp/yc_guard.pid" || true
-            adb install -r -g work/packed.apk || true
-            adb shell "am force-stop $APP_ID" || true
-            adb shell stop || true
-            for i in $(seq 1 60); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q stopped && break; sleep 1; done || true
-            adb pull /data/system/packages.xml work/packages-orig.xml || true
-            adb shell start || true
-            for i in $(seq 1 120); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q running && adb shell pm list packages 2>/dev/null | grep -q com.android.shell && break; sleep 2; done || true
-            adb uninstall $APP_ID || true
             adb install -r -g work/dump-build-signed.apk || true
+            sleep 5 || true
             adb shell pm path $APP_ID || echo DUMP_INSTALL_MISSING || true
             adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb shell stop || true
             for i in $(seq 1 60); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q stopped && break; sleep 1; done || true
             adb pull /data/system/packages.xml work/packages-dump.xml || true
-            python3 unpack/patch_packages_xml.py --orig work/packages-orig.xml --dump work/packages-dump.xml --out work/packages-patched.xml || true
+            python3 unpack/patch_packages_xml.py --dump work/packages-dump.xml --out work/packages-patched.xml || true
             adb push work/packages-patched.xml /data/system/packages.xml || true
             adb shell start || true
-            for i in $(seq 1 120); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q running && adb shell pm list packages 2>/dev/null | grep -q com.android.shell && break; sleep 2; done || true
+            sleep 75 || true
+            for i in $(seq 1 60); do adb shell pm path com.android.shell >/dev/null 2>&1 && break; sleep 2; done || true
+            sleep 10 || true
             adb shell pm path $APP_ID || echo PACKAGE_GONE_AFTER_TRANSPLANT || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 320 > /data/local/tmp/guard.log 2>&1 &" || true
             sleep 1
             adb logcat -c || true
