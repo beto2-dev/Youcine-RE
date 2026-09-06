@@ -135,6 +135,9 @@ jobs:
           "$CLANG" --target=x86_64-linux-android24 -O2 -o work/trace_guard unpack/trace_guard.c
           file work/trace_guard || true
           ls -l work/trace_guard
+          # the NDK eats ~2.5 GB; the emulator needs that space for userdata
+          rm -rf "$ANDROID_HOME/ndk" "$ANDROID_HOME/.temp" 2>/dev/null || true
+          df -h / | tail -1
 
       - name: Boot emulator and dump (dump-build + ptrace syscall guard)
         uses: reactivecircus/android-emulator-runner@v2
