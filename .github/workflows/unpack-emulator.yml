@@ -1,26 +1,24 @@
 name: Dynamic unpack (emulator)
 
-# Youcine-RE - iJiami unpack on an x86_64 emulator.
+# Youcine-RE - iJiami unpack.
 #
-# FULLY DIAGNOSED CAUSAL CHAIN (see docs/en/06-dynamic-unpack.md):
-#   1. armeabi-v7a install -> FULL ARM process (/system/bin/arm/app_process,
-#      everything under ndk_translation) -> x86 libexec rejected (EM_386 vs
-#      EM_ARM); arm64 libexec runs translated and SecLLVM self-decryption
-#      fails -> s.h.e.l.l.N.al never registered.
-#   2. Pure x86_64 dump-build (libexec.so + libexecmain.so load NATIVELY,
-#      proven with frida) is SIGKILLed by iJiami's signature check using
-#      RAW SYSCALLS (bypasses libc, so frida libc replacement is useless).
+# PRIMARY PATH (unpack-tcg-arm): the ORIGINAL apk on an arm64-v8a
+# system image running under pure TCG emulation on the linux x86_64
+# runner (the emulator ships qemu-system-aarch64 - probe run
+# 34058535954). Everything executes NATIVE ARM: the iJiami signature /
+# content checks pass legitimately, SecLLVM self-decryption works, and
+# the out-of-process /proc memdump never triggers the anti-debug
+# probes. No dump-build, no re-signing, no guards needed.
 #
-# THE FIX: unpack/trace_guard.c (built with the NDK, runs as root on the
-# device) PTRACE_ATTACHes to the app the moment it appears and rewrites
-# kill/tgkill/exit/exit_group SYSCALLS to getpid. The tamper suicide is
-# neutralized, decryption proceeds, and after the post-decrypt crash the
-# runtime's exit is blocked too - the process hangs ALIVE with the
-# decrypted DEX still mapped for the external memdump.
+# DOCUMENTED PATH (unpack-x86, skipped by default): the pure x86_64
+# dump-build loads libexec natively but the packer's content-integrity
+# gate refuses to decrypt a modified APK - its death ladder (raw-syscall
+# kill, int3, ud2, SIGSEGV) is fully neutralized by trace_guard.c but
+# the process stays pinned pre-decrypt. Kept for the research record.
 #
-# The rebuild job restores the real Application class, drops packer
-# assets, swaps in the dumped classes*.dex, zipaligns, signs and publishes
-# the 'unpacked-1.17.6' release for the boot-test workflow.
+# rebuild: restores the real Application class, drops packer assets,
+# swaps in the dumped classes*.dex, zipaligns, signs and publishes the
+# 'unpacked-1.17.6' release for the boot-test workflow.
 
 on:
   workflow_dispatch:
@@ -34,14 +32,14 @@ on:
           - release
           - secret
       api_level:
-        description: 'x86_64 emulator API level'
+        description: 'emulator API level'
         required: true
         default: '30'
         type: string
       skip_x86:
-        description: 'skip the x86_64 dump-build job (tamper check kills it)'
+        description: 'skip the x86_64 tamper-research job (default: yes)'
         required: false
-        default: false
+        default: true
         type: boolean
       release_tag:
         default: 'packed-1.17.6'
@@ -52,6 +50,121 @@ permissions:
   contents: write
 
 jobs:
+  unpack-tcg-arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    outputs:
+      dex_count: ${{ steps.count_arm.outputs.dex_count }}
+    env:
+      APP_ID: com.world.youcinemobile
+      LAUNCH: com.mobile.brasiltv.activity.SplashAty
+      EXPECT_DEX: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + arm64 image + AVD
+        env:
+          API: ${{ github.event.inputs.api_level || '30' }}
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-${API};google_apis;arm64-v8a" \
+            "platforms;android-${API}" > /dev/null
+          echo "no" | avdmanager create avd -n youcine-tcg \
+            -k "system-images;android-${API};google_apis;arm64-v8a" \
+            -d pixel_4 --force
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          find "$ANDROID_HOME/emulator" -maxdepth 3 -name "qemu-system-aarch64*" || true
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work dumped/youcine
+          if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
+            gh release download "${{ github.event.inputs.release_tag }}" \
+              -R "${{ github.repository }}" \
+              -p "${{ github.event.inputs.release_asset }}" \
+              -O work/packed.apk
+          else
+            curl -fL --retry 3 -o work/packed.apk "${{ secrets.SAMPLE_URL }}"
+          fi
+          sha256sum work/packed.apk | tee work/apk.sha256
+
+      - name: Boot arm64 TCG emulator (up to 40 min)
+        run: |
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          nohup emulator -avd youcine-tcg -no-window -gpu swiftshader_indirect \
+            -noaudio -no-boot-anim -camera-back none -accel off -port 5554 \
+            > work/emulator.log 2>&1 &
+          for i in $(seq 1 240); do
+            v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
+            sleep 10
+          done
+          echo "::error::TCG boot timeout"
+          tail -40 work/emulator.log || true
+          exit 1
+
+      - name: Install original APK, launch, dump
+        run: |
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          adb root || true
+          sleep 10
+          adb install -r -g work/packed.apk || true
+          adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
+          adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
+          adb logcat -c || true
+          adb shell am start -n $APP_ID/$LAUNCH || true
+          python3 unpack/external_memdump.py \
+            --app "$APP_ID" \
+            --out-dir dumped/youcine \
+            --expect "$EXPECT_DEX" \
+            --timeout 1500 \
+            --settle 25 \
+            --resweep-gap 60 || true
+          adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
+          adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijiami' | head -10" || true
+          adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
+          adb logcat -d -b main,system,crash > work/logcat-tcg.txt 2>/dev/null || true
+          grep -E "ijiami|s\.h\.e\.l\.l|FATAL|AndroidRuntime" work/logcat-tcg.txt | head -30 || true
+          ls -la dumped/youcine || true
+          mkdir -p count
+          ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
+          cat count/dex_count
+
+      - name: Collect output
+        id: count_arm
+        if: always()
+        run: |
+          val=$(cat count/dex_count 2>/dev/null || echo 0)
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+          echo "tcg-arm dex dumps: ${val:-0}"
+
+      - name: Gate (fail job when no dumps)
+        if: always() && steps.count_arm.outputs.dex_count == '0'
+        run: |
+          echo '::error::TCG arm64 native dump produced 0 DEX; inspect the dumps-tcg-arm artifact logcat.'
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-tcg-arm
+          path: |
+            dumped/
+            work/logcat-tcg.txt
+            work/apk.sha256
+            work/emulator.log
+          if-no-files-found: warn
+          retention-days: 7
+
   unpack-x86:
     if: ${{ !inputs.skip_x86 }}
     runs-on: ubuntu-latest
@@ -104,28 +217,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p work dumped/youcine
-          if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
-            gh release download "${{ github.event.inputs.release_tag }}" \
-              -R "${{ github.repository }}" \
-              -p "${{ github.event.inputs.release_asset }}" \
-              -O work/packed.apk
-          else
-            curl -fL --retry 3 -o work/packed.apk "${{ secrets.SAMPLE_URL }}"
-          fi
+          gh release download "${{ github.event.inputs.release_tag }}" \
+            -R "${{ github.repository }}" \
+            -p "${{ github.event.inputs.release_asset }}" \
+            -O work/packed.apk
           sha256sum work/packed.apk | tee work/apk.sha256
-          grep -q 28d028d75c89e6ab90c8b7e57a32c42355ac5ae2e388ea1e541bd003cae10d83 work/apk.sha256 \
-            || echo "::warning::SHA-256 differs from the analysed 1.17.6 sample"
 
       - name: "Dump build (evidence: re-signed x86_64 variant)"
         run: |
-          python3 unpack/make_dump_build.py --apk work/packed.apk --out work/dump-build.apk || true
+          python3 unpack/make_dump_build.py --apk work/packed.apk --out work/dump-build.apk
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
-          zipalign -f 4 work/dump-build.apk work/dump-build-aligned.apk || true
+          zipalign -f 4 work/dump-build.apk work/dump-build-aligned.apk
           keytool -genkeypair -keystore work/re.keystore -storepass android \
             -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
+            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null
           apksigner sign --ks work/re.keystore --ks-pass pass:android \
-            --out work/dump-build-signed.apk work/dump-build-aligned.apk || true
+            --out work/dump-build-signed.apk work/dump-build-aligned.apk
           ls -l work/ || true
 
       - name: "Build trace_guard (NDK x86_64)"
@@ -169,16 +276,12 @@ jobs:
             for i in $(seq 1 60); do adb shell pm path com.android.shell >/dev/null 2>&1 && break; sleep 2; done || true
             sleep 10 || true
             adb shell pm path $APP_ID || echo PACKAGE_GONE_AFTER_TRANSPLANT || true
-            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 320 > /data/local/tmp/guard.log 2>&1 &" || true
             sleep 1
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 260 --settle 1.0 --no-freeze --pull-app-data || true
-            adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijm' | head -10" || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 260 --settle 1.0 --no-freeze || true
             adb shell "cat /data/local/tmp/guard.log 2>/dev/null | tail -50" || true
-            adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             cp -f work/logcat.txt work/logcat-x86.txt || true
             ls -la dumped/youcine || true
@@ -193,13 +296,11 @@ jobs:
           val=$(cat count/dex_count 2>/dev/null || echo 0)
           echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
           echo "x86 dex dumps: ${val:-0}"
-          grep -E "ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|dlopen|libexec|FATAL" \
-            work/logcat.txt | head -30 || true
 
       - name: Gate (fail job when no dumps)
         if: always() && steps.count.outputs.dex_count == '0'
         run: |
-          echo '::error::x86 dump-build produced 0 DEX. Expected: iJiami anti-tamper signature check SIGKILLs the re-signed build (observed ~0.2s after start). Falling back to unpack-arm.'
+          echo '::error::x86 dump-build produced 0 DEX (expected: iJiami content-integrity gate blocks decryption of modified APKs; kept as the documented research path).'
           exit 1
 
       - uses: actions/upload-artifact@v4
@@ -212,111 +313,14 @@ jobs:
             work/apk.sha256
             work/dump-build.apk.sha256
             work/trace_guard
-            work/packages-orig.xml
             work/packages-dump.xml
             work/packages-patched.xml
           if-no-files-found: warn
           retention-days: 7
 
-  unpack-arm:
-    needs: unpack-x86
-    if: always() && (needs.unpack-x86.result == 'failure' || needs.unpack-x86.result == 'skipped')
-    runs-on: macos-14
-    timeout-minutes: 50
-    outputs:
-      dex_count: ${{ steps.count_arm.outputs.dex_count }}
-    env:
-      APP_ID: com.world.youcinemobile
-      LAUNCH: com.mobile.brasiltv.activity.SplashAty
-      EXPECT_DEX: '4'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - uses: android-actions/setup-android@v3
-
-      - name: SDK + ARM image
-        id: armimg
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" > /dev/null
-          for api in 33 30 31 32 34; do
-            if sdkmanager "system-images;android-${api};google_apis;arm64-v8a" "platforms;android-${api}" > /dev/null 2>&1; then
-              echo "api=$api" >> "$GITHUB_OUTPUT"
-              echo "using system-images;android-${api};google_apis;arm64-v8a"
-              exit 0
-            fi
-          done
-          echo "::error::no arm64-v8a google_apis image found"
-          exit 1
-
-      - name: Fetch packed APK
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p work dumped/youcine
-          gh release download "${{ github.event.inputs.release_tag }}" \
-            -R "${{ github.repository }}" \
-            -p "${{ github.event.inputs.release_asset }}" \
-            -O work/packed.apk
-          sha256sum work/packed.apk || shasum -a 256 work/packed.apk
-
-      - name: Boot emulator and dump (native arm64)
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ steps.armimg.outputs.api }}
-          arch: arm64-v8a
-          avd-name: youcine-arm
-          target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: |
-            adb root || true
-            sleep 5
-            adb install -r -g work/packed.apk || true
-            adb logcat -c || true
-            adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.2 --pull-app-data || true
-            adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
-            adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
-            cp -f work/logcat.txt work/logcat-arm.txt || true
-            ls -la dumped/youcine || true
-            mkdir -p count
-            echo "dex_count=$(ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ')" > count/dex_count
-            cat count/dex_count
-
-      - name: Collect output
-        id: count_arm
-        if: always()
-        run: |
-          val=$(cat count/dex_count 2>/dev/null || echo 0)
-          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
-          echo "arm dex dumps: ${val:-0}"
-
-      - name: Gate (fail job when no dumps)
-        if: always() && steps.count_arm.outputs.dex_count == '0'
-        run: |
-          echo '::error::arm64 native dump produced 0 DEX; inspect dumps-arm artifact logcat.'
-          exit 1
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: dumps-arm
-          path: |
-            dumped/
-            work/logcat-arm.txt
-            work/packed.apk
-          if-no-files-found: warn
-          retention-days: 7
-
   rebuild:
-    needs: [unpack-x86, unpack-arm]
-    if: always() && (needs.unpack-x86.result == 'success' || needs.unpack-arm.result == 'success')
+    needs: [unpack-tcg-arm, unpack-x86]
+    if: always() && (needs.unpack-tcg-arm.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -360,7 +364,7 @@ jobs:
         run: |
           set -ex
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
-          APK="dumps-arm/work/packed.apk"
+          APK="dumps-x86/work/packed.apk"
           [ -f "$APK" ] || APK="dumps/work/packed.apk"
           # packed apk fallback: fetch from release
           if [ ! -f "$APK" ]; then

@@ -146,7 +146,7 @@ def push_sweep_script() -> None:
 def batch_sweep(pid: int, local_dir: Path) -> list[Path]:
     """Run the on-device dd sweep and stream the dumps back as a tar."""
     local_dir.mkdir(parents=True, exist_ok=True)
-    adb_shell(f"sh {DEV_SWEEP} {pid} {DEV_OUT}", timeout=600)
+    adb_shell(f"sh {DEV_SWEEP} {pid} {DEV_OUT}", timeout=1500)
     # verify something was produced
     probe = adb_shell(f"ls {DEV_OUT}", timeout=30)
     if b".bin" not in (probe.stdout or b""):
@@ -157,7 +157,7 @@ def batch_sweep(pid: int, local_dir: Path) -> list[Path]:
             [ADB, "exec-out", f"tar -cf - -C {DEV_OUT} ."],
             stdout=fh,
             check=False,
-            timeout=900,
+            timeout=1800,
         )
     if tar_path.stat().st_size < 1024:
         tar_path.unlink()
