@@ -42,9 +42,11 @@
 
 /* x86_64 syscall numbers */
 #define SYS_read_ 0
+#define SYS_sched_yield_ 24
 #define SYS_getpid_ 39
 #define SYS_exit_ 60
 #define SYS_kill_ 62
+#define SYS_ptrace_ 101
 #define SYS_tgkill_ 131
 #define SYS_exit_group_ 231
 #define SYS_tkill_ 200
@@ -110,6 +112,16 @@ static int neutralize(pid_t tid, struct user_regs_struct *r)
     case SYS_rt_tgsigqueueinfo_:
         sig = (long)r->rdx;
         break;
+    case SYS_ptrace_:
+        /* anti-debug probe: PTRACE_TRACEME fails under a real tracer.
+         * fake success by swapping it for sched_yield() which returns 0. */
+        if ((long)r->rdi == 0 /* PTRACE_TRACEME */) {
+            r->orig_rax = SYS_sched_yield_;
+            fprintf(stderr, "[guard] tid %d: faked PTRACE_TRACEME success\n", tid);
+            fflush(stderr);
+            return 1;
+        }
+        return 0;
     case SYS_exit_:
     case SYS_exit_group_:
         r->orig_rax = SYS_getpid_;
@@ -137,106 +149,134 @@ int main(int argc, char **argv)
     long opts = PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK |
                 PTRACE_O_TRACECLONE;
 
-    pid_t main_pid = -1;
-    if (is_pid(argv[1])) {
-        main_pid = (pid_t)atoi(argv[1]);
-    } else {
-        int wait_loops = 0;
-        int max_loops = atoi(argv[2]) * 200; /* 5 ms each */
-        while (wait_loops++ < max_loops) {
-            main_pid = find_pid(argv[1]);
-            if (main_pid > 0)
-                break;
-            usleep(5000);
-        }
-    }
-    if (main_pid <= 0) {
-        fprintf(stderr, "[-] target not found\n");
-        return 1;
-    }
-    fprintf(stderr, "[guard] target pid %d\n", main_pid);
-
-    if (ptrace(PTRACE_ATTACH, main_pid, 0, 0) != 0) {
-        perror("PTRACE_ATTACH");
-        return 1;
-    }
-    int status;
-    waitpid(main_pid, &status, __WALL);
-    if (ptrace(PTRACE_SETOPTIONS, main_pid, 0, opts) != 0)
-        perror("SETOPTIONS");
-    if (ptrace(PTRACE_SYSCALL, main_pid, 0, 0) != 0)
-        perror("PTRACE_SYSCALL");
-
     int dur = atoi(argv[2]);
     signal(SIGALRM, on_alrm);
     signal(SIGINT, on_alrm);
     signal(SIGUSR1, on_usr1);
     signal(SIGUSR2, on_usr2);
     alarm((unsigned)dur);
-    fprintf(stderr, "[guard] tracing %d for %ds (pid written to /data/local/tmp/yc_guard.pid)\n",
-            main_pid, dur);
-    FILE *pf = fopen("/data/local/tmp/yc_guard.pid", "w");
-    if (pf) {
-        fprintf(pf, "%d\n", getpid());
-        fclose(pf);
-    }
+
+    const char *needle = is_pid(argv[1]) ? NULL : argv[1];
+    pid_t initial = is_pid(argv[1]) ? (pid_t)atoi(argv[1]) : -1;
+    int armed_rounds = 0;
 
     while (!g_stop) {
-        pid_t t = waitpid(-1, &status, __WALL);
-        if (t < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            fprintf(stderr, "[guard] tracee %d gone (%s %d)\n", t,
-                    WIFEXITED(status) ? "exit" : "sig",
-                    WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status));
-            if (t == main_pid)
-                break;
-            continue;
-        }
-        if (!WIFSTOPPED(status))
-            continue;
-        int sig = WSTOPSIG(status);
-        unsigned event = (unsigned)status >> 16;
-
-        if (g_frozen && sig == (SIGTRAP | 0x80)) {
-            /* hold this tracee at the syscall boundary while frozen */
-            while (g_frozen && !g_stop)
-                usleep(20000);
-            ptrace(PTRACE_SYSCALL, t, 0, 0);
-            continue;
-        }
-
-        if (sig == (SIGTRAP | 0x80)) { /* syscall stop */
-            struct user_regs_struct regs;
-            if (ptrace(PTRACE_GETREGS, t, 0, &regs) == 0) {
-                if ((long)regs.rax == -ENOSYS) { /* syscall entry */
-                    if (neutralize(t, &regs) == 1)
-                        ptrace(PTRACE_SETREGS, t, 0, &regs);
-                }
+        pid_t main_pid = initial;
+        if (needle) {
+            int wait_loops = 0;
+            int max_loops = 400; /* 2 s per round, then keep waiting overall */
+            while (wait_loops++ < max_loops && !g_stop) {
+                main_pid = find_pid(needle);
+                if (main_pid > 0)
+                    break;
+                usleep(5000);
             }
-            ptrace(PTRACE_SYSCALL, t, 0, 0);
-            continue;
+            if (main_pid <= 0) {
+                if (armed_rounds > 0)
+                    break; /* re-arm window exhausted */
+                fprintf(stderr, "[-] target not found\n");
+                return 1;
+            }
         }
-        if (sig == SIGTRAP && event) { /* fork/clone/vfork/exec event */
-            unsigned long msg = 0;
-            ptrace(PTRACE_GETEVENTMSG, t, 0, &msg);
-            pid_t child = (pid_t)msg;
-            ptrace(PTRACE_SETOPTIONS, child, 0, opts);
-            ptrace(PTRACE_SYSCALL, child, 0, 0);
-            ptrace(PTRACE_SYSCALL, t, 0, 0);
-            fprintf(stderr, "[guard] new tracee %d (from %d)\n", child, t);
-            continue;
+        if (main_pid <= 0 || g_stop)
+            break;
+        armed_rounds++;
+        fprintf(stderr, "[guard] target pid %d (round %d)\n", main_pid, armed_rounds);
+
+        if (ptrace(PTRACE_ATTACH, main_pid, 0, 0) != 0) {
+            perror("PTRACE_ATTACH");
+            if (needle)
+                continue; /* process may have died; re-arm */
+            return 1;
         }
-        if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
-            ptrace(PTRACE_SYSCALL, t, 0, 0); /* suppress group-stop signals */
-            continue;
+        int status;
+        waitpid(main_pid, &status, __WALL);
+        if (ptrace(PTRACE_SETOPTIONS, main_pid, 0, opts) != 0)
+            perror("SETOPTIONS");
+        if (ptrace(PTRACE_SYSCALL, main_pid, 0, 0) != 0)
+            perror("PTRACE_SYSCALL");
+
+        if (armed_rounds == 1) {
+            fprintf(stderr, "[guard] tracing for %ds (pid written to /data/local/tmp/yc_guard.pid)\n", dur);
+            FILE *pf = fopen("/data/local/tmp/yc_guard.pid", "w");
+            if (pf) {
+                fprintf(pf, "%d\n", getpid());
+                fclose(pf);
+            }
         }
-        ptrace(PTRACE_SYSCALL, t, 0, sig); /* relay */
+
+        /* ---- trace loop ---- */
+        int main_alive = 1;
+        while (main_alive && !g_stop) {
+            pid_t t = waitpid(-1, &status, __WALL);
+            if (t < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                fprintf(stderr, "[guard] tracee %d gone (%s %d)\n", t,
+                        WIFEXITED(status) ? "exit" : "sig",
+                        WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status));
+                if (t == main_pid) {
+                    main_alive = 0;
+                    break; /* re-arm on the next restart */
+                }
+                continue;
+            }
+            if (!WIFSTOPPED(status))
+                continue;
+            int sig = WSTOPSIG(status);
+            unsigned event = (unsigned)status >> 16;
+
+            if (g_frozen && sig == (SIGTRAP | 0x80)) {
+                /* hold this tracee at the syscall boundary while frozen */
+                while (g_frozen && !g_stop)
+                    usleep(20000);
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                continue;
+            }
+
+            if (sig == (SIGTRAP | 0x80)) { /* syscall stop */
+                struct user_regs_struct regs;
+                if (ptrace(PTRACE_GETREGS, t, 0, &regs) == 0) {
+                    if ((long)regs.rax == -ENOSYS) { /* syscall entry */
+                        if (neutralize(t, &regs) == 1)
+                            ptrace(PTRACE_SETREGS, t, 0, &regs);
+                    }
+                }
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                continue;
+            }
+            if (sig == SIGTRAP && event) { /* fork/clone/vfork/exec event */
+                unsigned long msg = 0;
+                ptrace(PTRACE_GETEVENTMSG, t, 0, &msg);
+                pid_t child = (pid_t)msg;
+                ptrace(PTRACE_SETOPTIONS, child, 0, opts);
+                ptrace(PTRACE_SYSCALL, child, 0, 0);
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                fprintf(stderr, "[guard] new tracee %d (from %d)\n", child, t);
+                continue;
+            }
+            if (sig == SIGTRAP) {
+                /* iJiami INT3 anti-debug probe: swallow the trap and let
+                 * execution continue past the int3 instruction. */
+                fprintf(stderr, "[guard] tid %d: swallowed SIGTRAP (int3 probe)\n", t);
+                fflush(stderr);
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                continue;
+            }
+            if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
+                ptrace(PTRACE_SYSCALL, t, 0, 0); /* suppress group-stop signals */
+                continue;
+            }
+            ptrace(PTRACE_SYSCALL, t, 0, sig); /* relay */
+        }
+        if (needle && !g_stop) {
+            fprintf(stderr, "[guard] main tracee died; re-arming\n");
+            usleep(300000);
+        }
     }
-    ptrace(PTRACE_DETACH, main_pid, 0, 0);
     fprintf(stderr, "[guard] done\n");
     return 0;
 }
