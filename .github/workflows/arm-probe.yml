@@ -1,0 +1,59 @@
+name: arm64 guest probe
+
+# Youcine-RE - can the LINUX x86_64 Android emulator run an arm64-v8a
+# system image as a guest (pure TCG, no KVM-accel for the guest arch)?
+# If yes, the ORIGINAL apk runs fully natively (ARM) and every packer
+# check passes; if not, the remaining path is read-buffer patching in
+# trace_guard (defeat emulator detection inside the translated process).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + arm64 image
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-30;google_apis;arm64-v8a" \
+            "platforms;android-30" > /dev/null || true
+          echo "=== emulator qemu binaries ==="
+          find "$ANDROID_HOME/emulator" -maxdepth 3 -name "qemu-system-*" || true
+          echo "no" | avdmanager create avd -n armprobe \
+            -k "system-images;android-30;google_apis;arm64-v8a" \
+            -d pixel_4 --force || true
+
+      - name: Boot arm64 guest (TCG)
+        run: |
+          mkdir -p work
+          nohup emulator -avd armprobe -no-window -gpu swiftshader_indirect \
+            -noaudio -no-boot-anim -accel off -port 5554 \
+            > work/emulator.log 2>&1 &
+          sleep 60
+          echo "=== emulator log (head) ==="
+          head -40 work/emulator.log
+          echo "=== adb devices ==="
+          adb devices || true
+          echo "=== waiting for boot (up to 15 min) ==="
+          for i in $(seq 1 180); do
+            v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$v" = "1" ] && echo "BOOT_OK after ~$((i*5))s" && break
+            sleep 5
+          done
+          adb shell getprop ro.product.cpu.abilist || true
+          adb shell getprop ro.product.cpu.abi || true
+          echo "=== emulator log (tail) ==="
+          tail -30 work/emulator.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: armprobe-${{ github.run_id }}
+          path: work/
+          if-no-files-found: warn
+          retention-days: 3
