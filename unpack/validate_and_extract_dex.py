@@ -22,6 +22,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump-dir", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument(
+        "--min-size",
+        type=int,
+        default=0x70,
+        help="drop DEX blobs smaller than this (packer stub is ~14 KiB)",
+    )
     args = ap.parse_args()
     dump_dir = Path(args.dump_dir)
     out_dir = Path(args.out_dir)
@@ -31,7 +37,7 @@ def main() -> int:
         if not p.is_file():
             continue
         data = p.read_bytes()
-        if is_dex(data):
+        if is_dex(data) and len(data) >= args.min_size:
             blobs.append(data)
             continue
         # maybe a raw region containing one dex at offset 0 already sliced

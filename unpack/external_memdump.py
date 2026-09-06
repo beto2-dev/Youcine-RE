@@ -1,117 +1,181 @@
 #!/usr/bin/env python3
-"""Out-of-process DEX dump via rooted adb (/proc/<pid>/maps + /proc/<pid>/mem).
+"""Poll-and-freeze out-of-process DEX dump via rooted adb.
 
-iJiami libexec.so uses ptrace. An in-process Frida agent is optional and may
-be killed; this dumper never maps into the target.
+iJiami's libexec.so uses ptrace-based anti-debug, so we never inject into
+the target. Strategy:
 
-Environment:
-  ADB   adb binary (default: adb on PATH)
+ 1. poll `pidof <app>` until the process appears (caller does `am start`)
+ 2. sleep --settle seconds so s.h.e.l.l.N.al() decrypts assets/ijiami.dat
+    (decryption happens in attachBaseContext, long before any Activity)
+ 3. SIGSTOP the process: freezes packer watchdogs, anti-debug timers and
+    post-decrypt crashes; /proc/<pid>/mem is now stable
+ 4. batch-sweep maps+mem ON-DEVICE with a root shell (one dd per region),
+    stream the region files out with `adb exec-out tar` (no pty mangling)
+ 5. scan locally for DEX magic, validate headers, dedupe by sha256
+ 6. SIGCONT, wait, freeze again; stop after --expect unique DEX or
+    --timeout, or after 3 consecutive sweeps without new findings
+ 7. optionally tar /data/data/<app> (packers sometimes drop the decrypted
+    dex on disk)
 
 Usage:
-  python3 unpack/external_memdump.py --app com.world.youcinemobile --out-dir dumped
+  python3 unpack/external_memdump.py --app com.world.youcinemobile \
+      --out-dir dumped/youcine --expect 4 --timeout 300
+
+Exit code: 0 if at least one unique DEX was captured.
+Writes: <out-dir>/*.bin (raw DEX), <out-dir>/dex_count.txt,
+        <out-dir>/appdata.tar (optional), <out-dir>/maps_snapshot.txt
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
+import sys
+import tarfile
+import tempfile
 import time
 from pathlib import Path
 
 DEX_MAGIC = b"dex\n"
+MAX_REGION = 96_000_000
+MIN_REGION = 0x10000
 
 ADB = os.environ.get("ADB", "adb")
 
+# POSIX sh sweep script executed as root on the device.
+# Filter: readable regions, 64 KiB..96 MiB, file-backed paths only when
+# they look dex/dalvik/memfd related; anonymous + [anon:*] + [heap] always.
+SWEEP_SH = r"""#!/system/bin/sh
+# usage: sweep.sh PID OUTDIR
+PID="$1"
+OUT="$2"
+rm -rf "$OUT"
+mkdir -p "$OUT"
+cp "/proc/$PID/maps" "$OUT/maps.txt" 2>/dev/null
+while IFS= read -r line; do
+  addr=${line%% *}
+  case "$addr" in
+    *-*) ;;
+    *) continue ;;
+  esac
+  rest=${line#* }
+  perms=${rest%% *}
+  path=${line##* }
+  start=$(( 0x${addr%%-*} ))
+  end=$(( 0x${addr##*-} ))
+  sz=$(( end - start ))
+  [ "$sz" -lt MINREGION ] && continue
+  [ "$sz" -gt MAXREGION ] && continue
+  case "$perms" in
+    r*) ;;
+    *) continue ;;
+  esac
+  case "$path" in
+    /apex/*|/system/*|/vendor/*|/product/*|/data/*|/dev/*|/proc/*)
+      case "$path" in
+        *dalvik*|*dex*|*memfd*|*cache*) ;;
+        *) continue ;;
+      esac
+      ;;
+  esac
+  skip=$(( start / 4096 ))
+  cnt=$(( (sz + 4095) / 4096 ))
+  dd if="/proc/$PID/mem" of="$OUT/r_$(printf %x $start)_$sz.bin" \
+     bs=4096 skip=$skip count=$cnt 2>/dev/null
+done < "/proc/$PID/maps"
+sync
+"""
 
-def adb(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [ADB, *args],
-        check=False,
-        capture_output=True,
-        timeout=timeout,
-    )
+DEV_SWEEP = "/data/local/tmp/yc_sweep.sh"
+DEV_OUT = "/data/local/tmp/yc_dump"
 
 
-def adb_bytes(*args: str, timeout: int = 60) -> bytes:
-    p = adb(*args, timeout=timeout)
-    return p.stdout or b""
+def adb(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run([ADB, *args], check=False, capture_output=True, timeout=timeout)
+
+
+def adb_shell(cmd: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    # Single string arg -> passed verbatim to the device shell.
+    return subprocess.run([ADB, "shell", cmd], check=False, capture_output=True, timeout=timeout)
 
 
 def pid_of(app: str) -> int | None:
-    for cmd in (("pidof", app), ("pidof", "-s", app)):
-        p = adb("shell", *cmd)
-        text = (p.stdout or b"").decode("utf-8", "replace").strip()
-        if text.split():
-            try:
-                return int(text.split()[0])
-            except ValueError:
-                continue
-    p = adb("shell", "ps", "-A")
-    for line in (p.stdout or b"").decode("utf-8", "replace").splitlines():
-        if app in line.split():
-            parts = line.split()
-            for tok in parts:
-                if tok.isdigit():
-                    return int(tok)
+    p = adb_shell(f"pidof {app}", timeout=15)
+    text = (p.stdout or b"").decode("utf-8", "replace").strip()
+    if text.split():
+        try:
+            return int(text.split()[0])
+        except ValueError:
+            pass
     return None
 
 
-def parse_maps(maps: str) -> list[tuple[int, int, str, str]]:
-    regions = []
-    for line in maps.splitlines():
-        # addr-addr perms offset dev inode pathname
-        try:
-            addr, rest = line.split(" ", 1)
-            start_s, end_s = addr.split("-")
-            start, end = int(start_s, 16), int(end_s, 16)
-        except ValueError:
-            continue
-        perms = rest[:4] if len(rest) >= 4 else rest
-        path = rest[rest.find("/") :] if "/" in rest else rest.split()[-1] if rest.split() else ""
-        regions.append((start, end, perms, path))
-    return regions
+def stop_proc(pid: int) -> None:
+    adb_shell(f"kill -STOP {pid}", timeout=15)
 
 
-def pull_chunk(pid: int, start: int, size: int) -> bytes:
-    # dd from /proc/pid/mem; skip is in bytes via ibs=1 (slow but portable)
-    # Use a small helper on-device with toybox dd if possible.
-    cmd = (
-        f"dd if=/proc/{pid}/mem bs=4096 skip={start // 4096} "
-        f"count={(size + 4095) // 4096} 2>/dev/null"
-    )
-    p = adb("exec-out", "su", "-c", cmd, timeout=120)
-    data = p.stdout or b""
-    off = start % 4096
-    return data[off : off + size] if data else b""
+def cont_proc(pid: int) -> None:
+    adb_shell(f"kill -CONT {pid}", timeout=15)
 
 
-def pull_chunk_run_as(pid: int, start: int, size: int) -> bytes:
-    # Fallback without su: adb root makes this work as shell.
-    cmd = (
-        f"dd if=/proc/{pid}/mem bs=4096 skip={start // 4096} "
-        f"count={(size + 4095) // 4096} 2>/dev/null"
-    )
-    p = adb("exec-out", "sh", "-c", cmd, timeout=120)
-    data = p.stdout or b""
-    off = start % 4096
-    return data[off : off + size] if data else b""
+def kill_proc(pid: int) -> None:
+    adb_shell(f"kill -9 {pid}", timeout=15)
+
+
+def push_sweep_script() -> None:
+    sweep = SWEEP_SH.replace("MINREGION", str(MIN_REGION)).replace("MAXREGION", str(MAX_REGION))
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(sweep)
+        path = fh.name
+    adb("push", path, DEV_SWEEP, timeout=30)
+    os.unlink(path)
+
+
+def batch_sweep(pid: int, local_dir: Path) -> list[Path]:
+    """Run the on-device dd sweep and stream the dumps back as a tar."""
+    local_dir.mkdir(parents=True, exist_ok=True)
+    adb_shell(f"sh {DEV_SWEEP} {pid} {DEV_OUT}", timeout=600)
+    # verify something was produced
+    probe = adb_shell(f"ls {DEV_OUT}", timeout=30)
+    if b".bin" not in (probe.stdout or b""):
+        return []
+    tar_path = local_dir / "sweep.tar"
+    with open(tar_path, "wb") as fh:
+        subprocess.run(
+            [ADB, "exec-out", f"tar -cf - -C {DEV_OUT} ."],
+            stdout=fh,
+            check=False,
+            timeout=900,
+        )
+    if tar_path.stat().st_size < 1024:
+        tar_path.unlink()
+        return []
+    files: list[Path] = []
+    try:
+        with tarfile.open(tar_path, "r") as tf:
+            tf.extractall(local_dir)  # noqa: S202 - trusted self-produced tar
+    except (tarfile.TarError, OSError) as exc:
+        print(f"[!] tar extract failed: {exc}", flush=True)
+    for p in sorted(local_dir.glob("*.bin")):
+        files.append(p)
+    # region files may be sparse/empty
+    files = [p for p in files if p.stat().st_size > 0]
+    return files
 
 
 def extract_dex(blob: bytes) -> list[bytes]:
-    found = []
+    found: list[bytes] = []
     idx = 0
     while True:
         i = blob.find(DEX_MAGIC, idx)
         if i < 0:
             break
-        if i + 8 > len(blob):
+        if i + 0x70 > len(blob):
             break
-        # dex\n035\0 or dex\n037\0 etc.
         if not (blob[i + 4 : i + 7].isdigit() and blob[i + 7] == 0):
             idx = i + 4
             continue
-        if i + 0x70 > len(blob):
-            break
         file_size = int.from_bytes(blob[i + 32 : i + 36], "little")
         if file_size < 0x70 or file_size > 80_000_000 or i + file_size > len(blob):
             idx = i + 4
@@ -121,81 +185,126 @@ def extract_dex(blob: bytes) -> list[bytes]:
     return found
 
 
-def dump_once(pid: int, out_dir: Path, seen: set[bytes]) -> int:
-    maps = adb_bytes("shell", "cat", f"/proc/{pid}/maps").decode("utf-8", "replace")
-    if not maps.strip():
-        print(f"[!] empty maps for pid {pid}", flush=True)
-        return 0
+def sweep_local(files: list[Path], out_dir: Path, seen: dict[str, bytes]) -> int:
     added = 0
-    for start, end, perms, path in parse_maps(maps):
-        size = end - start
-        if size <= 0 or size > 96_000_000:
+    for p in files:
+        try:
+            blob = p.read_bytes()
+        except OSError:
             continue
-        interesting = (
-            "r" in perms
-            and (
-                "dalvik" in path.lower()
-                or "dex" in path.lower()
-                or path in ("", "[anon:dalvik-main space]", "[heap]")
-                or path.startswith("[anon")
-                or "app_dex" in path
-                or "jit-cache" in path
-            )
-        )
-        # Always scan anonymous RW and large R-- mappings.
-        if not interesting:
-            if "rw" in perms and size >= 0x10000 and ("/" not in path or "dalvik" in path):
-                interesting = True
-        if not interesting:
-            continue
-        blob = pull_chunk(pid, start, size)
-        if not blob:
-            blob = pull_chunk_run_as(pid, start, size)
         if not blob:
             continue
         for dex in extract_dex(blob):
-            digest = hashlib_sha256(dex)
+            digest = hashlib.sha256(dex).hexdigest()
             if digest in seen:
                 continue
-            seen.add(digest)
+            seen[digest] = dex
             name = f"dex_{len(seen):02d}_{digest[:12]}.bin"
             (out_dir / name).write_bytes(dex)
-            print(f"[+] {name} {len(dex)} bytes from {path or 'anon'} {hex(start)}", flush=True)
+            print(f"[+] {name} {len(dex)} bytes", flush=True)
             added += 1
     return added
 
 
-def hashlib_sha256(data: bytes) -> str:
-    import hashlib
+def snapshot_maps(pid: int, out_dir: Path) -> None:
+    p = adb_shell(f"cat /proc/{pid}/maps", timeout=30)
+    data = p.stdout or b""
+    if data:
+        (out_dir / "maps_snapshot.txt").write_bytes(data)
 
-    return hashlib.sha256(data).hexdigest()
+
+def pull_app_data(app: str, out_dir: Path) -> None:
+    print("[*] tarring /data/data for on-disk evidence", flush=True)
+    tar_path = out_dir / "appdata.tar"
+    with open(tar_path, "wb") as fh:
+        subprocess.run(
+            [ADB, "exec-out", f"tar -cf - -C /data/data {app}"],
+            stdout=fh,
+            check=False,
+            timeout=600,
+        )
+    if tar_path.stat().st_size < 512:
+        tar_path.unlink()
+        return
+    print(f"[+] app data tar {tar_path.stat().st_size} bytes", flush=True)
+    try:
+        with tarfile.open(tar_path, "r") as tf:
+            names = tf.getnames()
+            interesting = [n for n in names if not n.endswith(".so") and tf.getmember(n).size() > 0x4000]
+            for n in interesting[:40]:
+                print(f"    data: {n}", flush=True)
+    except (tarfile.TarError, OSError):
+        pass
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Out-of-process iJiami DEX dump")
+    ap = argparse.ArgumentParser(description="Poll-and-freeze external DEX dump")
     ap.add_argument("--app", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--sweep-delays", default="2,4,8,15,30")
+    ap.add_argument("--expect", type=int, default=4, help="unique DEX to stop early")
+    ap.add_argument("--timeout", type=int, default=300, help="total seconds")
+    ap.add_argument("--settle", type=float, default=1.2, help="seconds to wait after pid appears")
+    ap.add_argument("--resweep-gap", type=float, default=6.0, help="seconds between freezes")
+    ap.add_argument("--pull-app-data", action="store_true")
     args = ap.parse_args()
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    delays = [int(x) for x in args.sweep_delays.split(",") if x.strip()]
-    seen: set[bytes] = set()
-    for delay in delays:
-        print(f"[*] sleep {delay}s then sweep", flush=True)
-        time.sleep(delay)
+
+    adb("wait-for-device", timeout=60)
+    push_sweep_script()
+
+    seen: dict[str, bytes] = {}
+    deadline = time.time() + args.timeout
+    start = time.time()
+    pid_seen_once = False
+    empty_streak = 0
+
+    while time.time() < deadline:
         pid = pid_of(args.app)
         if pid is None:
-            print("[!] app pid not found", flush=True)
+            if pid_seen_once and seen:
+                # process died after we captured DEX - we are done
+                print(f"[*] process gone after {len(seen)} unique dumps", flush=True)
+                break
+            time.sleep(0.3)
             continue
-        print(f"[*] pid {pid}", flush=True)
-        try:
-            dump_once(pid, out_dir, seen)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[!] sweep failed: {exc}", flush=True)
-    print(f"[*] unique dumps: {len(seen)}", flush=True)
+        pid_seen_once = True
+        print(f"[*] pid {pid} up ({time.time() - start:.1f}s); settle {args.settle}s", flush=True)
+        time.sleep(args.settle)
+        # re-check pid (may have died during settle)
+        if pid_of(args.app) != pid:
+            print("[*] pid changed/died during settle; retrying", flush=True)
+            continue
+        stop_proc(pid)
+        print(f"[*] SIGSTOP {pid}; sweeping /proc/{pid}/mem", flush=True)
+        snapshot_maps(pid, out_dir)
+        with tempfile.TemporaryDirectory(prefix="yc_sweep_") as td:
+            files = batch_sweep(pid, Path(td))
+            print(f"[*] pulled {len(files)} region files", flush=True)
+            added = sweep_local(files, out_dir, seen)
+        if len(seen) >= args.expect:
+            print(f"[*] reached expect={args.expect}; done", flush=True)
+            kill_proc(pid)
+            break
+        cont_proc(pid)
+        if added == 0:
+            empty_streak += 1
+            if empty_streak >= 3 and seen:
+                print("[*] 3 sweeps without new DEX; stopping", flush=True)
+                break
+        else:
+            empty_streak = 0
+        time.sleep(args.resweep_gap)
+
+    (out_dir / "dex_count.txt").write_text(f"{len(seen)}\n")
+    if args.pull_app_data and pid_seen_once:
+        pull_app_data(args.app, out_dir)
+    print(f"[*] unique DEX captured: {len(seen)}", flush=True)
+    for digest, dex in seen.items():
+        print(f"    {len(dex):>10}  {digest}", flush=True)
     return 0 if seen else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
