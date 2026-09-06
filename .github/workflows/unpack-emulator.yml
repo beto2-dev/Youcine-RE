@@ -50,9 +50,9 @@ permissions:
   contents: write
 
 jobs:
-  unpack-tcg-arm:
-    runs-on: ubuntu-latest
-    timeout-minutes: 100
+  unpack-macos-tcg:
+    runs-on: macos-14
+    timeout-minutes: 90
     outputs:
       dex_count: ${{ steps.count_arm.outputs.dex_count }}
     env:
@@ -79,8 +79,11 @@ jobs:
           echo "no" | avdmanager create avd -n youcine-tcg \
             -k "system-images;android-${API};google_apis;arm64-v8a" \
             -d pixel_4 --force
-          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-          find "$ANDROID_HOME/emulator" -maxdepth 3 -name "qemu-system-aarch64*" || true
+          # NOTE: macos-14 runners are Apple Silicon (arm64 hosts) but have
+          # NO Hypervisor.framework entitlement. -accel off forces same-arch
+          # TCG: slow but fully functional NATIVE ARM execution.
+          grep -q "hw.ramSize" ~/.android/avd/youcine-tcg.avd/config.ini || \
+            echo "hw.ramSize=2048" >> ~/.android/avd/youcine-tcg.avd/config.ini
 
       - name: Fetch packed APK
         env:
@@ -97,13 +100,13 @@ jobs:
           fi
           sha256sum work/packed.apk | tee work/apk.sha256
 
-      - name: Boot arm64 TCG emulator (up to 40 min)
+      - name: Boot arm64 TCG emulator (up to 45 min)
         run: |
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           nohup emulator -avd youcine-tcg -no-window -gpu swiftshader_indirect \
             -noaudio -no-boot-anim -camera-back none -accel off -port 5554 \
             > work/emulator.log 2>&1 &
-          for i in $(seq 1 240); do
+          for i in $(seq 1 270); do
             v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
             sleep 10
@@ -150,13 +153,13 @@ jobs:
       - name: Gate (fail job when no dumps)
         if: always() && steps.count_arm.outputs.dex_count == '0'
         run: |
-          echo '::error::TCG arm64 native dump produced 0 DEX; inspect the dumps-tcg-arm artifact logcat.'
+          echo '::error::macOS TCG arm64 native dump produced 0 DEX; inspect the dumps-macos-tcg artifact logcat.'
           exit 1
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dumps-tcg-arm
+          name: dumps-macos-tcg
           path: |
             dumped/
             work/logcat-tcg.txt
@@ -319,8 +322,8 @@ jobs:
           retention-days: 7
 
   rebuild:
-    needs: [unpack-tcg-arm, unpack-x86]
-    if: always() && (needs.unpack-tcg-arm.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0')
+    needs: [unpack-macos-tcg, unpack-x86]
+    if: always() && (needs.unpack-macos-tcg.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
