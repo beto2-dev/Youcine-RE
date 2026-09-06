@@ -57,10 +57,10 @@ jobs:
           gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
             -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
 
-      - name: Frida server (x86 32-bit for the armeabi-v7a process)
+      - name: "Frida server (x86_64 build, 32-bit helper spawns the app)"
         run: |
           curl -fsSL -o work/fs.xz \
-            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-x86.xz"
+            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-x86_64.xz"
           xz -d work/fs.xz
           ls -l work/fs
 
@@ -84,6 +84,8 @@ jobs:
             adb forward tcp:4789 tcp:4789 || true
             adb install -r -g --abi armeabi-v7a work/packed.apk || true
             adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -3" || true
+            adb shell "setprop debug.ld.app.$APP_ID dlopen,error" || true
+            adb shell "setprop debug.ld.all dlopen,error" || true
             adb logcat -c || true
             TRACE_SECONDS=40 python3 unpack/frida_trace_driver.py || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
