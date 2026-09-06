@@ -73,11 +73,38 @@ portal hosts.
 ## Unpack pipeline
 
 1. Static scan: `SAMPLE_APK=... python3 static-analysis/apk_quickscan.py`
-2. GitHub Action **Dynamic unpack (emulator)** installs the packed APK on an
-   x86_64 AVD (iJiami ships `libexec` for x86_64), launches `SplashAty`, and
-   dumps decrypted DEX out-of-process from `/proc/<pid>/mem`.
-3. `unpack/rebuild_unpacked_apk.py` restores the real Application class, drops
-   packer assets, zip-replaces `classes*.dex`, zipaligns and signs.
+2. GitHub Action **Dynamic unpack (emulator)** -> job `unpack-macos-tcg`:
+   boots an arm64-v8a AVD with `-accel off` (same-arch TCG on the Apple
+   Silicon runner - fully NATIVE ARM execution), installs the ORIGINAL
+   packed APK, launches `SplashAty` and dumps the decrypted DEX
+   out-of-process from `/proc/<pid>/mem` (no injection, no ptrace, no
+   in-process agent -> undetectable by the packer's anti-debug).
+3. `unpack/rebuild_unpacked_apk.py` restores the real Application class,
+   drops packer assets, zip-replaces `classes*.dex`, zipaligns, signs and
+   publishes the private release `unpacked-1.17.6`.
+4. GitHub Action **Boot test (unpacked APK)** installs the rebuilt
+   packer-free build on an arm64 emulator and verifies the real
+   `com.mobile.brasiltv.*` UI boots (screenshots + logcat + dumpsys).
+
+## Status (2026-09-07)
+
+Every tool in the pipeline is finished and validated piece by piece
+across ~20 instrumented CI runs; see
+[docs/en/03-protections-and-bypass.md](docs/en/03-protections-and-bypass.md)
+for the complete layer-by-layer map (ABI/translation trap, SecLLVM,
+content-integrity gate, the raw-syscall/int3/ud2/SIGSEGV death ladder and
+its neutralization in `unpack/trace_guard.c`).
+
+Two things remain, both pure execution:
+
+* **GitHub Actions minutes** on this account were exhausted during the
+  research session (macOS jobs bill at 10x). After the monthly reset -
+  or a spending-limit top-up - dispatch **Dynamic unpack (emulator)**
+  once and then **Boot test (unpacked APK)** once; both complete
+  automatically.
+* The final dump run costs roughly 25-45 min of macOS runner time
+  (10x multiplier). A self-hosted macOS runner (labels `macos-14,arm64`)
+  runs the same workflows for free.
 4. GitHub Action **Boot test** installs the unpacked APK on an **arm64**
    emulator (ijkplayer / Ranger JNI have no x86_64 builds) and stores logcat
    plus a screenshot.

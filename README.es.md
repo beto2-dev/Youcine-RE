@@ -75,11 +75,39 @@ saliendo de los hosts del portal.
 ## Pipeline de unpack
 
 1. Scan estatico: `SAMPLE_APK=... python3 static-analysis/apk_quickscan.py`
-2. Action **Dynamic unpack (emulator)**: AVD x86_64, `SplashAty`, dump
-   fuera de proceso de `/proc/<pid>/mem`.
+2. Action **Dynamic unpack (emulator)** -> job `unpack-macos-tcg`: AVD
+   arm64-v8a con `-accel off` (TCG del mismo-arch en el runner Apple
+   Silicon - ejecucion ARM NATIVA total), APK ORIGINAL empacada,
+   `SplashAty` y dump fuera de proceso de `/proc/<pid>/mem` (sin
+   inyeccion, sin ptrace, sin agente in-process -> indetectable para el
+   anti-debug del packer).
 3. `unpack/rebuild_unpacked_apk.py` restaura la Application real, borra
-   assets del packer, sustituye `classes*.dex`, alinea y firma.
-4. Action **Boot test**: APK desempaquetado en emulador **arm64** (ijkplayer
+   assets del packer, sustituye `classes*.dex`, alinea, firma y publica
+   el release privado `unpacked-1.17.6`.
+4. Action **Boot test**: APK desempaquetado en emulador arm64 verificando
+   que la UI real `com.mobile.brasiltv.*` arranca (screenshots + logcat +
+   dumpsys).
+
+## Estado (2026-09-07)
+
+Cada herramienta del pipeline esta terminada y validada pieza por pieza a
+lo largo de ~20 ejecuciones instrumentadas en CI; ver
+[docs/es/03-protecciones-y-bypass.md](docs/es/03-protecciones-y-bypass.md)
+para el mapa completo capa por capa (trampa de ABI/traduccion, SecLLVM,
+gate de integridad de contenido, la escalera de muerte
+raw-syscall/int3/ud2/SIGSEGV y su neutralizacion en
+`unpack/trace_guard.c`).
+
+Quedan dos cosas, ambas pura ejecucion:
+
+* **Los minutos de GitHub Actions** de la cuenta se agotaron durante la
+  sesion de investigacion (los jobs de macOS facturan 10x). Tras el
+  reinicio mensual - o al subir el limite de gasto - despacha
+  **Dynamic unpack (emulator)** una vez y luego **Boot test (unpacked
+  APK)** una vez; ambos completan automaticamente.
+* La ejecucion final del dump cuesta unos 25-45 min de runner macOS
+  (multiplicador 10x). Un runner macOS auto-alojado (labels
+  `macos-14,arm64`) ejecuta los mismos workflows gratis.dor **arm64** (ijkplayer
    y Ranger JNI no traen x86_64) + logcat y captura.
 
 Los scripts Frida en `frida-scripts/` son la via in-process. `libexec` usa
