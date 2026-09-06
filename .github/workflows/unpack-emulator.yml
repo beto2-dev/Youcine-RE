@@ -158,20 +158,22 @@ jobs:
             adb install -r -g work/packed.apk || true
             adb shell "am force-stop $APP_ID" || true
             adb shell stop || true
-            sleep 3
+            for i in $(seq 1 60); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q stopped && break; sleep 1; done || true
             adb pull /data/system/packages.xml work/packages-orig.xml || true
             adb shell start || true
-            for i in $(seq 1 90); do adb shell service check package 2>/dev/null | grep -q found && break; sleep 2; done || true
+            for i in $(seq 1 120); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q running && adb shell pm list packages 2>/dev/null | grep -q com.android.shell && break; sleep 2; done || true
             adb uninstall $APP_ID || true
             adb install -r -g work/dump-build-signed.apk || true
+            adb shell pm path $APP_ID || echo DUMP_INSTALL_MISSING || true
             adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb shell stop || true
-            sleep 3
+            for i in $(seq 1 60); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q stopped && break; sleep 1; done || true
             adb pull /data/system/packages.xml work/packages-dump.xml || true
             python3 unpack/patch_packages_xml.py --orig work/packages-orig.xml --dump work/packages-dump.xml --out work/packages-patched.xml || true
             adb push work/packages-patched.xml /data/system/packages.xml || true
             adb shell start || true
-            for i in $(seq 1 90); do adb shell service check package 2>/dev/null | grep -q found && break; sleep 2; done || true
+            for i in $(seq 1 120); do adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q running && adb shell pm list packages 2>/dev/null | grep -q com.android.shell && break; sleep 2; done || true
+            adb shell pm path $APP_ID || echo PACKAGE_GONE_AFTER_TRANSPLANT || true
             adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 320 > /data/local/tmp/guard.log 2>&1 &" || true
             sleep 1
             adb logcat -c || true

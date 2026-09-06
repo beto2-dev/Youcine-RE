@@ -164,7 +164,7 @@ int main(int argc, char **argv)
         pid_t main_pid = initial;
         if (needle) {
             int wait_loops = 0;
-            int max_loops = 400; /* 2 s per round, then keep waiting overall */
+            int max_loops = (armed_rounds == 0) ? (dur * 200) : 400;
             while (wait_loops++ < max_loops && !g_stop) {
                 main_pid = find_pid(needle);
                 if (main_pid > 0)
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
             if (main_pid <= 0) {
                 if (armed_rounds > 0)
                     break; /* re-arm window exhausted */
-                fprintf(stderr, "[-] target not found\n");
+                fprintf(stderr, "[-] target not found within %ds\n", dur);
                 return 1;
             }
         }
