@@ -1,0 +1,106 @@
+name: Frida trace (load diagnostics)
+
+# Youcine-RE - spawn-gated Frida tracer for the iJiami stub.
+# Answers WHY s.h.e.l.l.N.al is never registered: hooks System.load /
+# System.loadLibrary (the junk try/catch in the stub swallows the
+# UnsatisfiedLinkError, so logcat never shows the dlerror string) and
+# android_dlopen_ext / ptrace / kill / exit.
+# If the packer is satisfied and the app survives, the external memdump
+# runs in the same session to capture the decrypted DEX.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      APP_ID: com.world.youcinemobile
+      FRIDA_VERSION: '16.6.6'
+      EXPECT_DEX: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm",GROUP="kvm",MODE="0666",OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python deps
+        run: python3 -m pip install --quiet frida==16.6.6
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + AVD
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-30;google_apis;x86_64" \
+            "platforms;android-30" > /dev/null
+          echo "no" | avdmanager create avd -n youcine \
+            -k "system-images;android-30;google_apis;x86_64" \
+            -d pixel_4 --force
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work dumped/youcine
+          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+
+      - name: Frida server (x86 32-bit for the armeabi-v7a process)
+        run: |
+          curl -fsSL -o work/fs.xz \
+            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-x86.xz"
+          xz -d work/fs.xz
+          ls -l work/fs
+
+      - name: Boot emulator, trace, dump
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          avd-name: youcine
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            adb root || true
+            sleep 5
+            adb push work/fs /data/local/tmp/fs || true
+            adb shell "chmod 755 /data/local/tmp/fs" || true
+            adb shell "setsid /data/local/tmp/fs -l 127.0.0.1:4789 > /data/local/tmp/fs.log 2>&1 &" || true
+            sleep 2
+            adb shell "ps -A | grep ' fs$' || echo FRIDA_NOT_RUNNING" || true
+            adb forward tcp:4789 tcp:4789 || true
+            adb install -r -g --abi armeabi-v7a work/packed.apk || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -3" || true
+            adb logcat -c || true
+            TRACE_SECONDS=40 python3 unpack/frida_trace_driver.py || true
+            adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
+            adb shell "cat /data/local/tmp/fs.log 2>/dev/null | head -20" || true
+            adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
+            ls -la dumped/youcine || true
+            mkdir -p count
+            ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
+            cat count/dex_count
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frida-trace-${{ github.run_id }}
+          path: |
+            work/trace.log
+            work/logcat.txt
+            dumped/
+          if-no-files-found: warn
+          retention-days: 7

@@ -246,6 +246,11 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=1.2, help="seconds to wait after pid appears")
     ap.add_argument("--resweep-gap", type=float, default=6.0, help="seconds between freezes")
     ap.add_argument("--pull-app-data", action="store_true")
+    ap.add_argument(
+        "--no-freeze",
+        action="store_true",
+        help="sweep the live process without SIGSTOP (e.g. while a frida tracer is attached)",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -276,8 +281,11 @@ def main() -> int:
         if pid_of(args.app) != pid:
             print("[*] pid changed/died during settle; retrying", flush=True)
             continue
-        stop_proc(pid)
-        print(f"[*] SIGSTOP {pid}; sweeping /proc/{pid}/mem", flush=True)
+        if not args.no_freeze:
+            stop_proc(pid)
+            print(f"[*] SIGSTOP {pid}; sweeping /proc/{pid}/mem", flush=True)
+        else:
+            print(f"[*] sweeping live process {pid} (no freeze)", flush=True)
         snapshot_maps(pid, out_dir)
         with tempfile.TemporaryDirectory(prefix="yc_sweep_") as td:
             files = batch_sweep(pid, Path(td))
@@ -287,7 +295,8 @@ def main() -> int:
             print(f"[*] reached expect={args.expect}; done", flush=True)
             kill_proc(pid)
             break
-        cont_proc(pid)
+        if not args.no_freeze:
+            cont_proc(pid)
         if added == 0:
             empty_streak += 1
             if empty_streak >= 3 and seen:
