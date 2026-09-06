@@ -79,12 +79,27 @@ jobs:
           API: ${{ github.event.inputs.api_level || '30' }}
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" \
-            "system-images;android-${API};google_apis;arm64-v8a" \
-            "platforms;android-${API}" > /dev/null
+          sdkmanager "platform-tools" "emulator" > /dev/null
+          # Try the google_apis image first (fuller environment), fall back
+          # to the MUCH lighter AOSP 'default' images - under TCG the GMS
+          # stack dominates boot time, and the decryption dump does not
+          # need Google services at all.
+          IMG=""
+          for cand in \
+            "system-images;android-28;default;arm64-v8a" \
+            "system-images;android-30;default;arm64-v8a" \
+            "system-images;android-27;default;arm64-v8a" \
+            "system-images;android-${API};google_apis;arm64-v8a"; do
+            if sdkmanager "${cand}" "platforms;$(echo ${cand} | sed 's|system-images;||; s|;.*||' | sed 's|android|android|')" > /dev/null 2>&1; then
+              IMG="$cand"
+              break
+            fi
+          done
+          [ -z "$IMG" ] && { echo "::error::no arm64 image found"; exit 1; }
+          echo "USING_IMAGE=$IMG" >> "$GITHUB_ENV"
+          echo "using $IMG"
           echo "no" | avdmanager create avd -n youcine-tcg \
-            -k "system-images;android-${API};google_apis;arm64-v8a" \
-            -d pixel_4 --force
+            -k "$IMG" -d pixel_4 --force
           # NOTE: macos-14 runners are Apple Silicon (arm64 hosts) but have
           # NO Hypervisor.framework entitlement. -accel off forces same-arch
           # TCG: slow but fully functional NATIVE ARM execution.
