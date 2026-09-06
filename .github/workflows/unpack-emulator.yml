@@ -2,19 +2,22 @@ name: Dynamic unpack (emulator)
 
 # Youcine-RE - iJiami dump on an x86_64 emulator.
 #
-# Why a "dump build": the packed APK ships lib/{armeabi-v7a,arm64-v8a} only.
-# On an x86_64 emulator with native-bridge (ndk_translation) the installer
-# assigns primaryCpuAbi=arm64-v8a, the iJiami stub then extracts
-# assets/ijm_lib/arm64-v8a/libexec.so and runs it TRANSLATED. SecLLVM
-# self-modifying code does not survive translation, JNI registration for
-# s.h.e.l.l.N.al never happens and the app dies before decrypting DEX
-# (observed in run #34044920876). Stripping lib/arm* yields a pure x86_64
-# process: the stub selects assets/ijm_lib/x86_64/libexec.so natively.
+# PRIMARY PATH (original APK, no modification, signature intact):
+#   pm install --abi armeabi-v7a pins primaryCpuAbi=armeabi-v7a so the app
+#   process is forked from the 32-bit x86 zygote (the google_apis x86_64
+#   image ships zygote32 with abilist x86,armeabi-v7a,armeabi and
+#   libndk_translation). In that 32-bit process the iJiami stub's ld()
+#   reads /system/bin/linker (32-bit x86, e_machine=EM_386) -> "x86",
+#   il() sees a 32-bit process -> extracts assets/ijm_lib/x86/libexec.so
+#   which runs as NATIVE x86 code (no binary translation), and the
+#   signature check passes because the APK is untouched.
 #
-# Fallback: a macOS-14 runner runs an arm64-v8a emulator where the ORIGINAL
-# apk executes natively (like real devices).
+# EVIDENCE PATH (dump-build): stripping lib/arm* forces a pure x86_64
+# process and the stub extracts ijm_lib/x86_64/libexec.so natively, but
+# the re-signed APK is SIGKILLed ~0.2s after start by iJiami's anti-tamper
+# signature verification (run 34046807813) - kept for documentation.
 #
-# Finally the rebuild job restores the real Application class, drops packer
+# The rebuild job restores the real Application class, drops packer
 # assets, swaps in the dumped classes*.dex, zipaligns, signs and publishes
 # the 'unpacked-1.17.6' release for the boot-test workflow.
 
@@ -112,20 +115,19 @@ jobs:
           grep -q 28d028d75c89e6ab90c8b7e57a32c42355ac5ae2e388ea1e541bd003cae10d83 work/apk.sha256 \
             || echo "::warning::SHA-256 differs from the analysed 1.17.6 sample"
 
-      - name: Dump build (strip ARM lib/ -> force native x86_64 packer)
+      - name: "Dump build (evidence: re-signed x86_64 variant)"
         run: |
-          python3 unpack/make_dump_build.py --apk work/packed.apk --out work/dump-build.apk
+          python3 unpack/make_dump_build.py --apk work/packed.apk --out work/dump-build.apk || true
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
-          zipalign -f 4 work/dump-build.apk work/dump-build-aligned.apk
+          zipalign -f 4 work/dump-build.apk work/dump-build-aligned.apk || true
           keytool -genkeypair -keystore work/re.keystore -storepass android \
             -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null
+            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
           apksigner sign --ks work/re.keystore --ks-pass pass:android \
-            --out work/dump-build-signed.apk work/dump-build-aligned.apk
-          apksigner verify --print-certs work/dump-build-signed.apk | head -5
-          ls -l work/
+            --out work/dump-build-signed.apk work/dump-build-aligned.apk || true
+          ls -l work/ || true
 
-      - name: Boot emulator and dump
+      - name: Boot emulator and dump (original APK pinned to armeabi-v7a)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ github.event.inputs.api_level || '30' }}
@@ -137,7 +139,9 @@ jobs:
           script: |
             adb root || true
             sleep 5
-            adb install -r -g work/dump-build-signed.apk || true
+            adb shell getprop ro.product.cpu.abilist || true
+            adb install -r -g --abi armeabi-v7a work/packed.apk || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|secondaryCpuAbi' | head -5" || true
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
             python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.2 --pull-app-data || true
