@@ -153,15 +153,30 @@ jobs:
             sleep 5
             adb push work/trace_guard /data/local/tmp/trace_guard || true
             adb shell "chmod 755 /data/local/tmp/trace_guard" || true
-            adb shell "rm -f /data/local/tmp/yc_guard.pid /data/local/tmp/guard.log" || true
-            adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 340 > /data/local/tmp/guard.log 2>&1 &" || true
-            sleep 1
-            adb shell "cat /data/local/tmp/guard.log 2>/dev/null | head -5" || true
-            adb install -r -g work/dump-build-signed.apk || true
             adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
+            adb shell "rm -f /data/local/tmp/guard.log /data/local/tmp/yc_guard.pid" || true
+            adb install -r -g work/packed.apk || true
+            adb shell "am force-stop $APP_ID" || true
+            adb shell stop || true
+            sleep 3
+            adb pull /data/system/packages.xml work/packages-orig.xml || true
+            adb shell start || true
+            for i in $(seq 1 90); do adb shell service check package 2>/dev/null | grep -q found && break; sleep 2; done || true
+            adb uninstall $APP_ID || true
+            adb install -r -g work/dump-build-signed.apk || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
+            adb shell stop || true
+            sleep 3
+            adb pull /data/system/packages.xml work/packages-dump.xml || true
+            python3 unpack/patch_packages_xml.py --orig work/packages-orig.xml --dump work/packages-dump.xml --out work/packages-patched.xml || true
+            adb push work/packages-patched.xml /data/system/packages.xml || true
+            adb shell start || true
+            for i in $(seq 1 90); do adb shell service check package 2>/dev/null | grep -q found && break; sleep 2; done || true
+            adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 320 > /data/local/tmp/guard.log 2>&1 &" || true
+            sleep 1
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.0 --no-freeze --pull-app-data || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 260 --settle 1.0 --no-freeze --pull-app-data || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
             adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijm' | head -10" || true
             adb shell "cat /data/local/tmp/guard.log 2>/dev/null | tail -50" || true
@@ -199,6 +214,9 @@ jobs:
             work/apk.sha256
             work/dump-build.apk.sha256
             work/trace_guard
+            work/packages-orig.xml
+            work/packages-dump.xml
+            work/packages-patched.xml
           if-no-files-found: warn
           retention-days: 7
 
