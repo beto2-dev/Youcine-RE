@@ -1,18 +1,28 @@
-name: Frida trace (load diagnostics)
+name: Frida guard (tamper bypass + dump)
 
-# Youcine-RE - spawn-gated Frida tracer for the iJiami stub.
-# Answers WHY s.h.e.l.l.N.al is never registered: hooks System.load /
-# System.loadLibrary (the junk try/catch in the stub swallows the
-# UnsatisfiedLinkError, so logcat never shows the dlerror string) and
-# android_dlopen_ext / ptrace / kill / exit.
-# If the packer is satisfied and the app survives, the external memdump
-# runs in the same session to capture the decrypted DEX.
+# Youcine-RE - anti-tamper neutralizer + timed freeze + DEX dump.
+#
+# THE PROBLEM (fully diagnosed with bionic debug.ld logging):
+#   * the armeabi-v7a process is a FULL ARM process (/system/bin/arm/
+#     app_process, everything under ndk_translation) -> the x86 libexec
+#     is rejected: "is for EM_386 (3) instead of EM_ARM (40)"
+#   * the arm64 libexec loads but SecLLVM self-decryption fails under
+#     binary translation -> N.al never registered
+#   * the pure x86_64 dump-build (libexec runs NATIVELY, proven) is
+#     SIGKILLed ~0.2s after start by iJiami's signature verification of
+#     the re-signed APK
+#
+# THE FIX: frida spawn-gates the dump-build process and replaces
+# libc kill/tgkill/exit/abort so the signature check cannot commit
+# suicide, then SIGSTOPs the process exactly when the real Application
+# is about to be instantiated (decrypted DEX in memory) for the external
+# poll-and-freeze memdump.
 
 on:
   workflow_dispatch:
 
 jobs:
-  trace:
+  guard-dump:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -30,6 +40,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm || true
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -44,27 +59,37 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" \
             "system-images;android-30;google_apis;x86_64" \
-            "platforms;android-30" > /dev/null
+            "platforms;android-30" "build-tools;34.0.0" > /dev/null
           echo "no" | avdmanager create avd -n youcine \
             -k "system-images;android-30;google_apis;x86_64" \
             -d pixel_4 --force
 
-      - name: Fetch packed APK
+      - name: Fetch packed APK + build dump-build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p work dumped/youcine
           gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
             -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+          sha256sum work/packed.apk
+          python3 unpack/make_dump_build.py --apk work/packed.apk --out work/dump-build.apk
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          zipalign -f 4 work/dump-build.apk work/dump-build-aligned.apk
+          keytool -genkeypair -keystore work/re.keystore -storepass android \
+            -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null
+          apksigner sign --ks work/re.keystore --ks-pass pass:android \
+            --out work/dump-build-signed.apk work/dump-build-aligned.apk
+          ls -l work/
 
-      - name: "Frida server (x86_64 build, 32-bit helper spawns the app)"
+      - name: "Frida server (x86_64 build)"
         run: |
           curl -fsSL -o work/fs.xz \
             "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-x86_64.xz"
           xz -d work/fs.xz
           ls -l work/fs
 
-      - name: Boot emulator, trace, dump
+      - name: Boot emulator, guard, freeze, dump
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
@@ -82,14 +107,11 @@ jobs:
             sleep 2
             adb shell "ps -A | grep ' fs$' || echo FRIDA_NOT_RUNNING" || true
             adb forward tcp:4789 tcp:4789 || true
-            adb install -r -g --abi armeabi-v7a work/packed.apk || true
-            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -3" || true
-            adb shell "setprop debug.ld.app.$APP_ID dlopen,error" || true
-            adb shell "setprop debug.ld.all dlopen,error" || true
+            adb install -r -g work/dump-build-signed.apk || true
+            adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
             adb logcat -c || true
-            TRACE_SECONDS=40 python3 unpack/frida_trace_driver.py || true
+            TRACE_SECONDS=90 DUMP_TIMEOUT=300 SCRIPT=05_tamper_guard.js python3 unpack/frida_trace_driver.py || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            adb shell "cat /data/local/tmp/fs.log 2>/dev/null | head -20" || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             ls -la dumped/youcine || true
             mkdir -p count
@@ -99,7 +121,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: frida-trace-${{ github.run_id }}
+          name: frida-guard-${{ github.run_id }}
           path: |
             work/trace.log
             work/logcat.txt

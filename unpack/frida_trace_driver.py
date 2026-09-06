@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
-"""Frida spawn-gated driver: trace iJiami lib loads, then optionally dump.
+"""Frida spawn-gated driver: neutralize packer tamper-kill, freeze at the
+right moment, then dump the decrypted DEX out-of-process.
 
-Spawns com.world.youcinemobile suspended, injects
-frida-scripts/04_trace_loads.js BEFORE any app code runs, resumes it and
-collects messages. If the process survives (packer satisfied), runs the
-external poll-and-freeze memdump afterwards to capture the decrypted DEX.
+Flow (dump-build / pure x86_64 process):
+ 1. spawn com.world.youcinemobile gated, inject the guard script
+    (default frida-scripts/05_tamper_guard.js) BEFORE any app code
+ 2. resume; the guard suppresses the iJiami signature-check suicide
+    (libc kill/tgkill/exit/abort) and SIGSTOPs the process exactly when
+    Instrumentation.newApplication is about to build the real
+    com.mobile.brasiltv.app.App (decrypted DEX now lives in memory)
+ 3. on [FROZEN] (or timeout), run the external memdump sweeps
 
 Environment:
-  FRIDA_REMOTE   frida-server endpoint (default 127.0.0.1:4789)
+  FRIDA_REMOTE   endpoint (default 127.0.0.1:4789)
   APP_ID         package (default com.world.youcinemobile)
-  TRACE_SECONDS  message collection window (default 40)
+  SCRIPT         frida script file name (default 05_tamper_guard.js)
+  TRACE_SECONDS  max wait for freeze (default 60)
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import frida
 
 APP_ID = os.environ.get("APP_ID", "com.world.youcinemobile")
-TRACE_SECONDS = int(os.environ.get("TRACE_SECONDS", "40"))
+TRACE_SECONDS = int(os.environ.get("TRACE_SECONDS", "60"))
+SCRIPT_NAME = os.environ.get("SCRIPT", "05_tamper_guard.js")
 FRIDA_REMOTE = os.environ.get("FRIDA_REMOTE", "127.0.0.1:4789")
 
 OUT = open("work/trace.log", "a", encoding="utf-8")
+FROZEN = threading.Event()
 
 
 def note(line: str) -> None:
@@ -37,22 +46,19 @@ def on_message(message: dict, data: object) -> None:
     mtype = message.get("type")
     if mtype == "send":
         payload = message.get("payload")
-        if isinstance(payload, dict):
-            note("[js] " + str(payload.get("msg")))
-        else:
-            note("[js] " + str(payload))
+        text = str(payload.get("msg")) if isinstance(payload, dict) else str(payload)
+        note("[js] " + text)
+        if "FROZEN" in text:
+            FROZEN.set()
     elif mtype == "error":
         note("[js!] " + str(message.get("description")))
-        stack = message.get("stack")
-        if stack:
-            note(str(stack))
     else:
         note("[js?] " + str(message))
 
 
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
-    js_path = os.path.join(here, "..", "frida-scripts", "04_trace_loads.js")
+    js_path = os.path.join(here, "..", "frida-scripts", SCRIPT_NAME)
     source = open(js_path, encoding="utf-8").read()
 
     mgr = frida.get_device_manager()
@@ -70,36 +76,20 @@ def main() -> int:
     device.resume(pid)
 
     deadline = time.time() + TRACE_SECONDS
-    while time.time() < deadline:
-        time.sleep(0.5)
-        try:
-            procs = [p.pid for p in device.enumerate_processes() if p.pid == pid]
-        except Exception:
-            procs = []
-        if not procs:
-            note("[!] process died during trace")
-            break
-        try:
-            alive = subprocess.run(
-                ["adb", "shell", f"pidof {APP_ID}"],
-                capture_output=True,
-                timeout=10,
-            )
-            if not (alive.stdout or b"").strip():
-                note("[!] app pid gone from device")
-                break
-        except Exception:
-            pass
+    while time.time() < deadline and not FROZEN.is_set():
+        time.sleep(0.4)
 
-    note("[*] trace window complete")
+    if FROZEN.is_set():
+        note("[*] process FROZEN at decryption point; sweeping memory")
+    else:
+        note("[*] no freeze signal; checking app state")
 
-    # If the app survived the packer stage, sweep its memory for DEX.
     alive = subprocess.run(
         ["adb", "shell", f"pidof {APP_ID}"], capture_output=True, timeout=10
     )
     pid_text = (alive.stdout or b"").decode().strip()
     if pid_text:
-        note(f"[*] app alive (pid {pid_text}); running external memdump")
+        note(f"[*] app pid {pid_text}; running external memdump")
         memdump = os.path.join(here, "external_memdump.py")
         subprocess.run(
             [
@@ -114,7 +104,7 @@ def main() -> int:
                 "--timeout",
                 os.environ.get("DUMP_TIMEOUT", "240"),
                 "--settle",
-                "1.0",
+                "0.2",
                 "--no-freeze",
             ],
             check=False,
