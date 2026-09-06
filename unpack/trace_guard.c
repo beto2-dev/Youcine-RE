@@ -58,6 +58,7 @@ static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_frozen = 0;
 static unsigned g_faults = 0;
 static unsigned g_ills = 0;
+static unsigned g_segvs = 0;
 
 static void on_alrm(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; g_frozen = 1; }
@@ -307,17 +308,39 @@ int main(int argc, char **argv)
                 ptrace(PTRACE_SYSCALL, t, 0, 0);
                 continue;
             }
-            if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS ||
-                sig == SIGFPE) {
-                /* Deliberate crash (anti-tamper ladder step): suppress the
-                 * signal. The faulting instruction re-executes and faults
-                 * again in a tight loop - the thread burns one core but the
-                 * process stays ALIVE with all memory (incl. any decrypted
-                 * DEX) intact for the external dumper. */
+            if (sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE) {
+                /* RELAY to ART's handler chain: ART implements implicit
+                 * null/array checks with SIGSEGV - suppressing those pins
+                 * the faulting instruction in an infinite refault loop
+                 * (8.4M suppressed faults observed). Relay lets Java-level
+                 * exceptions (incl. post-decrypt UnsatisfiedLinkError) throw
+                 * normally; the runtime's subsequent kill/exit is already
+                 * neutralized so the process stays alive for the dumper. */
+                if (g_segvs < 5) {
+                    siginfo_t si;
+                    memset(&si, 0, sizeof si);
+                    if (ptrace(PTRACE_GETSIGINFO, t, 0, &si) == 0) {
+                        struct user_regs_struct r_;
+                        unsigned long long rip_ = 0;
+                        if (ptrace(PTRACE_GETREGS, t, 0, &r_) == 0)
+                            rip_ = (unsigned long long)r_.rip;
+                        fprintf(stderr,
+                                "[guard] tid %d: relaying fault sig %d addr=%p rip=%llx code=%d\n",
+                                t, sig, si.si_addr, rip_, si.si_code);
+                        fflush(stderr);
+                    }
+                    g_segvs++;
+                }
+                ptrace(PTRACE_SYSCALL, t, 0, sig);
+                continue;
+            }
+            if (sig == SIGABRT) {
+                /* runtime abort after a Java FATAL: suppress so the process
+                 * stays alive (kill/exit syscalls are neutralized anyway) */
                 g_faults++;
                 if (g_faults <= 5 || (g_faults % 100000) == 0) {
-                    fprintf(stderr, "[guard] tid %d: suppressed fault signal %d (total %u)\n",
-                            t, sig, g_faults);
+                    fprintf(stderr, "[guard] tid %d: suppressed SIGABRT (total %u)\n",
+                            t, g_faults);
                     fflush(stderr);
                 }
                 ptrace(PTRACE_SYSCALL, t, 0, 0);
