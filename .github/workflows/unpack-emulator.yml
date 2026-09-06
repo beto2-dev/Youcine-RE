@@ -129,21 +129,13 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set -x
             adb root || true
             sleep 5
-            adb install -r -g work/dump-build-signed.apk
+            adb install -r -g work/dump-build-signed.apk || true
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py \
-              --app "$APP_ID" \
-              --out-dir dumped/youcine \
-              --expect "$EXPECT_DEX" \
-              --timeout 300 \
-              --settle 1.2 \
-              --pull-app-data || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.2 --pull-app-data || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            # which libexec did the stub extract?
             adb shell "ls -l /data/data/$APP_ID/files/ 2>/dev/null" || true
             adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
@@ -155,10 +147,11 @@ jobs:
 
       - name: Collect output
         id: count
+        if: always()
         run: |
           val=$(cat count/dex_count 2>/dev/null || echo 0)
-          echo "dex_count=$val" >> "$GITHUB_OUTPUT"
-          echo "x86 dex dumps: $val"
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+          echo "x86 dex dumps: ${val:-0}"
           grep -E "ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|dlopen|libexec|FATAL" \
             work/logcat.txt | head -30 || true
 
@@ -176,9 +169,11 @@ jobs:
 
   unpack-arm:
     needs: unpack-x86
-    if: needs.unpack-x86.outputs.dex_count == '0'
+    if: always() && needs.unpack-x86.outputs.dex_count == '0'
     runs-on: macos-14
     timeout-minutes: 50
+    outputs:
+      dex_count: ${{ steps.count_arm.outputs.dex_count }}
     env:
       APP_ID: com.world.youcinemobile
       LAUNCH: com.mobile.brasiltv.activity.SplashAty
@@ -229,19 +224,12 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set -x
             adb root || true
             sleep 5
-            adb install -r -g work/packed.apk
+            adb install -r -g work/packed.apk || true
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py \
-              --app "$APP_ID" \
-              --out-dir dumped/youcine \
-              --expect "$EXPECT_DEX" \
-              --timeout 300 \
-              --settle 1.2 \
-              --pull-app-data || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.2 --pull-app-data || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
             adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
@@ -250,6 +238,14 @@ jobs:
             mkdir -p count
             echo "dex_count=$(ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ')" > count/dex_count
             cat count/dex_count
+
+      - name: Collect output
+        id: count_arm
+        if: always()
+        run: |
+          val=$(cat count/dex_count 2>/dev/null || echo 0)
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+          echo "arm dex dumps: ${val:-0}"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -264,7 +260,7 @@ jobs:
 
   rebuild:
     needs: [unpack-x86, unpack-arm]
-    if: always() && (needs.unpack-x86.outputs.dex_count != '0' || needs.unpack-arm.result == 'success')
+    if: always() && (needs.unpack-x86.outputs.dex_count != '0' || needs.unpack-arm.outputs.dex_count != '0')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
