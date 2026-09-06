@@ -266,6 +266,16 @@ int main(int argc, char **argv)
                 ptrace(PTRACE_SYSCALL, t, 0, 0);
                 continue;
             }
+            if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS ||
+                sig == SIGFPE || sig == SIGILL) {
+                /* Deliberate crash (anti-tamper ladder step): suppress the
+                 * signal. The faulting instruction re-executes and faults
+                 * again in a tight loop - the thread burns one core but the
+                 * process stays ALIVE with all memory (incl. any decrypted
+                 * DEX) intact for the external dumper. */
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                continue;
+            }
             if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
                 ptrace(PTRACE_SYSCALL, t, 0, 0); /* suppress group-stop signals */
                 continue;

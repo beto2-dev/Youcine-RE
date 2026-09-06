@@ -31,8 +31,10 @@ from pathlib import Path
 
 # ARM ABI dirs to drop; keep x86 / x86_64 (if the sample ever ships them).
 ARM_LIB = re.compile(r"^lib/(armeabi|armeabi-v7a|arm64-v8a|mips|mips64)/")
-# v1 JAR signature leftovers (apksigner regenerates them).
-SIG_FILES = re.compile(r"^META-INF/.*\.(RSA|DSA|EC|SF)$|^META-INF/MANIFEST\.MF$")
+# NOTE: the original v1 JAR signature files (META-INF/XXL-OTT.RSA etc.) are
+# KEPT ON PURPOSE. The dump-build is re-signed at v2/v3 level for install,
+# but iJiami's signature check may read the v1 cert file directly - keeping
+# the original makes that variant of the check pass.
 
 
 def build(src: Path, dst: Path) -> tuple[int, int]:
@@ -43,7 +45,7 @@ def build(src: Path, dst: Path) -> tuple[int, int]:
     ) as zout:
         for info in zin.infolist():
             name = info.filename
-            if ARM_LIB.match(name) or SIG_FILES.match(name):
+            if ARM_LIB.match(name):
                 dropped += 1
                 continue
             entry = zipfile.ZipInfo(name, date_time=info.date_time)
@@ -70,7 +72,7 @@ def main() -> int:
     sha = hashlib.sha256(dst.read_bytes()).hexdigest()
     Path(str(dst) + ".sha256").write_text(f"{sha}  {dst.name}\n")
     print(f"[+] dump build: {dst} ({dst.stat().st_size} bytes)", flush=True)
-    print(f"[+] kept {kept} entries, dropped {dropped} (ARM lib/ + v1 sigs)", flush=True)
+    print(f"[+] kept {kept} entries, dropped {dropped} (ARM lib/; v1 sigs kept)", flush=True)
     print(f"[+] sha256 {sha}", flush=True)
     print("[!] next: zipalign -f 4 <out> && apksigner sign (see workflow)", flush=True)
     return 0
