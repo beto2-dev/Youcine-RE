@@ -55,6 +55,7 @@
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_frozen = 0;
+static unsigned g_faults = 0;
 
 static void on_alrm(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; g_frozen = 1; }
@@ -273,6 +274,12 @@ int main(int argc, char **argv)
                  * again in a tight loop - the thread burns one core but the
                  * process stays ALIVE with all memory (incl. any decrypted
                  * DEX) intact for the external dumper. */
+                g_faults++;
+                if (g_faults <= 5 || (g_faults % 100000) == 0) {
+                    fprintf(stderr, "[guard] tid %d: suppressed fault signal %d (total %u)\n",
+                            t, sig, g_faults);
+                    fflush(stderr);
+                }
                 ptrace(PTRACE_SYSCALL, t, 0, 0);
                 continue;
             }

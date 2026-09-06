@@ -44,8 +44,11 @@ MIN_REGION = 0x10000
 ADB = os.environ.get("ADB", "adb")
 
 # POSIX sh sweep script executed as root on the device.
-# Filter: readable regions, 64 KiB..96 MiB, file-backed paths only when
-# they look dex/dalvik/memfd related; anonymous + [anon:*] + [heap] always.
+# Filter: readable regions, >= 64 KiB; file-backed paths only when they
+# look dex/dalvik/memfd related; anonymous + [anon:*] + [heap] always.
+# Regions larger than 64 MiB (the 1 GiB dalvik region space!) are swept
+# in 64 MiB chunks with a 2 MiB overlap so a DEX straddling a chunk
+# boundary is still captured whole.
 SWEEP_SH = r"""#!/system/bin/sh
 # usage: sweep.sh PID OUTDIR
 PID="$1"
@@ -53,6 +56,8 @@ OUT="$2"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "/proc/$PID/maps" "$OUT/maps.txt" 2>/dev/null
+CHUNK=$((64*1024*1024))
+OVL=$((2*1024*1024))
 while IFS= read -r line; do
   addr=${line%% *}
   case "$addr" in
@@ -66,7 +71,6 @@ while IFS= read -r line; do
   end=$(( 0x${addr##*-} ))
   sz=$(( end - start ))
   [ "$sz" -lt MINREGION ] && continue
-  [ "$sz" -gt MAXREGION ] && continue
   case "$perms" in
     r*) ;;
     *) continue ;;
@@ -79,10 +83,17 @@ while IFS= read -r line; do
       esac
       ;;
   esac
-  skip=$(( start / 4096 ))
-  cnt=$(( (sz + 4095) / 4096 ))
-  dd if="/proc/$PID/mem" of="$OUT/r_$(printf %x $start)_$sz.bin" \
-     bs=4096 skip=$skip count=$cnt 2>/dev/null
+  off=0
+  while [ $off -lt $sz ]; do
+    csz=$(( CHUNK + OVL ))
+    rem=$(( sz - off ))
+    [ $csz -gt $rem ] && csz=$rem
+    addr2=$(( start + off ))
+    skip=$(( addr2 / 4096 ))
+    cnt=$(( (csz + 4095) / 4096 ))
+    dd if="/proc/$PID/mem" of="$OUT/r_$(printf %x $addr2)_$csz.bin" bs=4096 skip=$skip count=$cnt 2>/dev/null
+    off=$(( off + CHUNK ))
+  done
 done < "/proc/$PID/maps"
 sync
 """
@@ -124,7 +135,7 @@ def kill_proc(pid: int) -> None:
 
 
 def push_sweep_script() -> None:
-    sweep = SWEEP_SH.replace("MINREGION", str(MIN_REGION)).replace("MAXREGION", str(MAX_REGION))
+    sweep = SWEEP_SH.replace("MINREGION", str(MIN_REGION))
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
         fh.write(sweep)
         path = fh.name
