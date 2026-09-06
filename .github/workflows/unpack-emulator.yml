@@ -1,0 +1,147 @@
+name: Dynamic unpack (emulator)
+
+# Youcine-RE - iJiami dump on an x86_64 emulator.
+# libexec is shipped for x86_64 under assets/ijm_lib/x86_64, so the packer
+# can decrypt DEX without ARM translation. Frida is optional; the default
+# path is an out-of-process /proc/pid/mem sweep (libexec uses ptrace).
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_source:
+        description: 'packed APK source'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - secret
+      api_level:
+        description: 'emulator API level'
+        required: true
+        default: '30'
+        type: string
+      release_tag:
+        default: 'packed-1.17.6'
+      release_asset:
+        default: 'ycMob_1.17.6_ycsite.apk'
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      APP_ID: com.world.youcinemobile
+      LAUNCH: com.mobile.brasiltv.activity.SplashAty
+      FRIDA_VERSION: '16.6.6'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm",GROUP="kvm",MODE="0666",OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python deps
+        run: python3 -m pip install --quiet androguard pycryptodome
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + AVD
+        env:
+          API: ${{ github.event.inputs.api_level || '30' }}
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-${API};google_apis;x86_64" \
+            "platforms;android-${API}" "build-tools;34.0.0"
+          echo "no" | avdmanager create avd -n youcine \
+            -k "system-images;android-${API};google_apis;x86_64" \
+            -d pixel_4 --force
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work
+          if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
+            gh release download "${{ github.event.inputs.release_tag }}" \
+              -R "${{ github.repository }}" \
+              -p "${{ github.event.inputs.release_asset }}" \
+              -O work/packed.apk
+          else
+            curl -fL --retry 3 -o work/packed.apk "${{ secrets.SAMPLE_URL }}"
+          fi
+          sha256sum work/packed.apk | tee work/apk.sha256
+          grep -q 28d028d75c89e6ab90c8b7e57a32c42355ac5ae2e388ea1e541bd003cae10d83 work/apk.sha256 \
+            || echo "::warning::SHA-256 differs from the analysed 1.17.6 sample"
+
+      - name: Boot emulator and dump
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ github.event.inputs.api_level || '30' }}
+          arch: x86_64
+          avd-name: youcine
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -x
+            adb root
+            sleep 5
+            adb install -r -g work/packed.apk
+            mkdir -p dumped/youcine
+            adb shell am start -n $APP_ID/$LAUNCH || true
+            python3 unpack/external_memdump.py --app "$APP_ID" --out-dir dumped/youcine --sweep-delays 2,4,8,15,30 || true
+            adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
+            adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
+            ls -la dumped/youcine || true
+
+      - name: Rebuild unpacked APK
+        env:
+          APKTOOL_JAR: work/apktool.jar
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          curl -fsSL -o work/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar
+          if [ -d dumped/youcine ] && ls dumped/youcine/*.bin >/dev/null 2>&1; then
+            mkdir -p dexs
+            python3 unpack/validate_and_extract_dex.py --dump-dir dumped/youcine --out-dir dexs || true
+            if ls dexs/*.dex >/dev/null 2>&1; then
+              python3 unpack/rebuild_unpacked_apk.py \
+                --apk work/packed.apk \
+                --dump-dir dexs \
+                --out work/youcine-unpacked.apk \
+                --keystore work/re.keystore \
+                --storepass android
+            else
+              echo "::warning::No valid DEX dumps"
+            fi
+          else
+            echo "::warning::No dumps captured"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: youcine-unpacked-${{ github.run_id }}
+          path: |
+            dumped/
+            dexs/
+            work/*.apk
+            work/apk.sha256
+            work/logcat*.txt
+          if-no-files-found: warn
+          retention-days: 7

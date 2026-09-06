@@ -1,0 +1,74 @@
+name: Ghidra headless (libexec)
+
+# Youcine-RE - JDK 21 + Ghidra 12.1.3 over iJiami libexec.so (x86_64).
+# The packed APK is pulled from the private release; only native libs are
+# imported into Ghidra (the APK itself is not kept as an artifact).
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        default: 'packed-1.17.6'
+      release_asset:
+        default: 'ycMob_1.17.6_ycsite.apk'
+
+jobs:
+  ghidra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch Ghidra 12.1.3
+        run: |
+          curl -fsSL -o ghidra.zip \
+            https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip
+          echo "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54  ghidra.zip" | sha256sum -c -
+          unzip -q ghidra.zip
+
+      - name: Fetch sample and extract libexec
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work/natives
+          gh release download "${{ github.event.inputs.release_tag }}" \
+            -R "${{ github.repository }}" \
+            -p "${{ github.event.inputs.release_asset }}" \
+            -O work/packed.apk
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          zf = zipfile.ZipFile("work/packed.apk")
+          out = Path("work/natives")
+          want = (
+              "assets/ijm_lib/x86_64/libexec.so",
+              "assets/ijm_lib/x86_64/libexecmain.so",
+          )
+          for name in want:
+              out.joinpath(Path(name).name).write_bytes(zf.read(name))
+              print("extracted", name)
+          PY
+
+      - name: Analyze
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+          WORK_DIR: ${{ github.workspace }}/work/ghidra
+        run: |
+          chmod +x ghidra-scripts/run_headless.sh
+          ./ghidra-scripts/run_headless.sh \
+            "${PWD}/ghidra_12.1.3_PUBLIC" \
+            work/natives/libexec.so \
+            work/natives/libexecmain.so
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ghidra-libexec-${{ github.run_id }}
+          path: work/ghidra/reports/
+          if-no-files-found: warn
+          retention-days: 14

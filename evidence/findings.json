@@ -1,0 +1,190 @@
+{
+  "project": "Youcine-RE",
+  "license": "GPL-3.0-only",
+  "authors": ["beto-2dev", "ChapzoMods"],
+  "purpose": "Educational reverse engineering, packer analysis, malware-analysis methodology, client/server classification.",
+  "sample": {
+    "filename": "ycMob_1.17.6_ycsite.apk",
+    "label": "YouCine",
+    "package": "com.world.youcinemobile",
+    "version_name": "1.17.6",
+    "version_code": 11706,
+    "min_sdk": 19,
+    "target_sdk": 33,
+    "compile_sdk": 34,
+    "size_bytes": 42877511,
+    "sha256": "28d028d75c89e6ab90c8b7e57a32c42355ac5ae2e388ea1e541bd003cae10d83",
+    "zip_entries": 3716,
+    "dex_files": [{"name": "classes.dex", "size": 13608}],
+    "main_activity": "com.mobile.brasiltv.activity.SplashAty",
+    "internal_application": "com.mobile.brasiltv.app.App",
+    "shell_application": "s.h.e.l.l.S",
+    "shell_component_factory": "s.h.e.l.l.A",
+    "original_component_factory": "androidx.core.app.CoreComponentFactory",
+    "signer": {
+      "file": "META-INF/XXL-OTT.RSA",
+      "subject": "C=86, ST=GD, L=SZ, O=XXL, OU=OTT, CN=xxl",
+      "self_signed": true
+    }
+  },
+  "packer": {
+    "vendor": "iJiami (AiJiami / 爱加密)",
+    "product": "SecLLVM + libexec shell + data-encryption sidecar",
+    "compiler_string": "ijiami SecLLVM compiler 1.7.4.20",
+    "encrypted_dex_count": 4,
+    "encrypted_payload_bytes": 9543463,
+    "likely_uncompressed_dex_bytes": 41140828,
+    "payload_md5_ascii": "44f6438002be91557b704ba909f62f58",
+    "payload_sha256": "228d6a21182cf07a5da80b254994cba37208098e9538448fc905aaada98698af",
+    "assets": [
+      "assets/ijiami.dat",
+      "assets/ijiami.ajm",
+      "assets/IJMDal.Data",
+      "assets/signed.bin",
+      "assets/af.bin",
+      "assets/libijmDataEncryption.so",
+      "assets/libijmDataEncryption_arm64.so",
+      "assets/libijmDataEncryption_x86.so",
+      "assets/libijmDataEncryption_x86_64.so",
+      "assets/ijm_lib/{armeabi,arm64-v8a,x86,x86_64}/libexec.so",
+      "assets/ijm_lib/{armeabi,arm64-v8a,x86,x86_64}/libexecmain.so"
+    ],
+    "ajm_magic": "indl01",
+    "notes": "Stub DEX (14 KiB) only contains s.h.e.l.l.{S,A,N,C}. Real bytecode lives in ijiami.dat and is mapped in-memory by libexec.so via N.al()."
+  },
+  "protections": [
+    {
+      "id": "ijiami-shell",
+      "layer": "client",
+      "name": "iJiami Application / AppComponentFactory shell",
+      "status": "mapped",
+      "bypass": "Restore android:name to com.mobile.brasiltv.app.App and appComponentFactory to androidx.core.app.CoreComponentFactory after dumping DEX."
+    },
+    {
+      "id": "ijiami-dex-encrypt",
+      "layer": "client",
+      "name": "Encrypted multi-DEX (ijiami.dat, 4 payloads)",
+      "status": "dynamic-dump",
+      "bypass": "Out-of-process /proc/pid/mem sweep after attachBaseContext, plus Frida ClassLoader dump as fallback."
+    },
+    {
+      "id": "ijiami-native-vmp",
+      "layer": "client",
+      "name": "ijiami.ajm native protection (indl01) + SecLLVM",
+      "status": "present",
+      "bypass": "Not required for DEX unpack. Keep for native RE in Ghidra."
+    },
+    {
+      "id": "ptrace-antidebug",
+      "layer": "client",
+      "name": "ptrace + /proc/self/maps in libexec.so",
+      "status": "mapped",
+      "bypass": "Prefer external memdump (no in-process agent). Frida on non-default port as secondary."
+    },
+    {
+      "id": "abi-select",
+      "layer": "client",
+      "name": "ABI selector extracts libexec from assets/ijm_lib/<abi>/",
+      "status": "mapped",
+      "bypass": "x86_64 libexec is shipped, so an x86_64 emulator can decrypt DEX without ARM translation."
+    },
+    {
+      "id": "data-encryption",
+      "layer": "client",
+      "name": "com.ijm.dataencryption.DETool.loadDEso",
+      "status": "mapped",
+      "bypass": "Loaded from stub S.sp(); drop sidecar .so files after unpack."
+    },
+    {
+      "id": "integrity-signed-bin",
+      "layer": "client",
+      "name": "assets/signed.bin + libed25519.so payload/signature check",
+      "status": "present",
+      "bypass": "Remove with packer assets; re-sign the rebuilt APK."
+    },
+    {
+      "id": "allowbackup-false",
+      "layer": "client",
+      "name": "android:allowBackup=false",
+      "status": "policy",
+      "bypass": "Not a packer. Optional analysis patch only."
+    },
+    {
+      "id": "cleartext",
+      "layer": "client",
+      "name": "android:usesCleartextTraffic=true",
+      "status": "policy",
+      "bypass": "Indicates HTTP portal/CDN traffic is expected."
+    },
+    {
+      "id": "force-upgrade",
+      "layer": "server",
+      "name": "upgrade_main / version_forbidden strings",
+      "status": "server-side",
+      "bypass": "Cannot be removed client-side; the catalog/upgrade hosts decide."
+    },
+    {
+      "id": "vip-token",
+      "layer": "server",
+      "name": "Account / VIP / device-bind (LoginAty, DeviceManageAty)",
+      "status": "server-side",
+      "bypass": "Out of scope. Entitlements live on portal hosts."
+    }
+  ],
+  "sdks": [
+    {"name": "iJiami SecLLVM / libexec", "role": "packer", "layer": "client", "evidence": "assets/ijm_lib, stub s.h.e.l.l"},
+    {"name": "ijkplayer 4.4 + FFmpeg", "role": "playback", "layer": "client", "evidence": "libijkplayer.so libijkffmpeg.so libijksdl.so"},
+    {"name": "Aria download framework", "role": "offline download", "layer": "client", "evidence": "assets/aria_config.xml"},
+    {"name": "Google Cast", "role": "Chromecast", "layer": "client+google", "evidence": "play-services-cast, CastOptionsProvider"},
+    {"name": "HPPlay / LeLink", "role": "DLNA / private cast", "layer": "client", "evidence": "com.hpplay.sdk, assets/hpplay, assets/lelink_config"},
+    {"name": "Firebase (Analytics, Crashlytics NDK, Messaging, Dynamic Links, In-App Messaging)", "role": "telemetry / push", "layer": "client+google", "evidence": "google_app_id 1:771252312300:android:59fcb5cf6080703f66adc9"},
+    {"name": "AdMob", "role": "ads", "layer": "client+google", "evidence": "ca-app-pub-8403581247282419~2129662664"},
+    {"name": "Facebook SDK", "role": "login / social", "layer": "client+meta", "evidence": "facebook_app_id 1167846391661277"},
+    {"name": "Umeng + umeng-spy + Taobao ACCS / Agoo", "role": "push / analytics / fingerprint", "layer": "client", "evidence": "UMENG_APPKEY 68b7aaa3ec2b5b6f883069bb, libumeng-spy.so"},
+    {"name": "Qiniu DNS", "role": "HTTP DNS", "layer": "client", "evidence": "com.qiniu.android.dns.NetworkReceiver"},
+    {"name": "Alibaba crashsdk / tnet", "role": "crash / network", "layer": "client", "evidence": "libcrashsdk.so libtnet-3.1.14.so"},
+    {"name": "Ranger JNI (media stack)", "role": "playback / TLS bundle", "layer": "client", "evidence": "libranger-jni.so 7.7 MiB arm64"},
+    {"name": "ed25519", "role": "signature verify", "layer": "client", "evidence": "libed25519.so"},
+    {"name": "Google Sign-In / Play Services", "role": "auth", "layer": "client+google", "evidence": "default_web_client_id 771252312300-0ndcanas41p726n0hsb3b4r2qrhpdu0b.apps.googleusercontent.com"}
+  ],
+  "client_server": {
+    "client": [
+      "iJiami packer, integrity, anti-debug",
+      "UI activities under com.mobile.brasiltv.* (same lineage as Magis/Xuper/Brasil TV)",
+      "Local playback (ijkplayer, Ranger, Aria)",
+      "Cast discovery (Google Cast, HPPlay/LeLink)",
+      "Embedded domain lists in resources (portal/epg/upgrade/notice/ad/h5)",
+      "Device / Google / Facebook login UX",
+      "Firebase / Umeng / AdMob SDKs"
+    ],
+    "server": [
+      "Catalog / VOD / live portal (portal_main / portal_backup)",
+      "EPG (epg_main / epg_backup)",
+      "Force-upgrade and version kill-switch (upgrade_main / upgrade_backup)",
+      "Notices (notice_main / notice_backup)",
+      "Ad config (ad_main / ad_backup)",
+      "H5 pages (h5.youcine.pro)",
+      "Account, VIP, redemption, device bind, payments",
+      "Stream URL minting (not present in the stub DEX; returned by portal)"
+    ],
+    "hosts_in_resources": {
+      "portal_main": "jbfnl.phdelbotq.com",
+      "portal_backup": "hrvxm.zgyhovdmu.com",
+      "epg_main": "pre.itgfgdz.com",
+      "epg_backup": "pre.utedbr.com",
+      "upgrade_main": "wposj.liegmzoct.com",
+      "upgrade_backup": "uahtw.ydahseguj.com",
+      "notice_main": "dqnuv.ytuhckpdi.com",
+      "notice_backup": "bjria.boqdnwzfk.com",
+      "ad_main": "afjhl.maqywglrp.com",
+      "ad_backup": "wfqco.ejkgtuqwa.com",
+      "h5_main": "h5.youcine.pro",
+      "download_hint": "dwonload.youcine.net/dw"
+    }
+  },
+  "family": {
+    "internal_package_prefix": "com.mobile.brasiltv",
+    "related": ["Magis TV", "Xuper TV", "Brasil TV", "YouCine"],
+    "note": "Same activity names (SplashAty, MainAty, PlayAty) as the Magis/Xuper lineage. This build is rebranded YouCine and packed with iJiami instead of SecNeo."
+  }
+}

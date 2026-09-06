@@ -1,0 +1,75 @@
+name: Static analysis
+
+# Youcine-RE - androguard / zip inventory of the packed sample.
+# Does not need an emulator. APK comes from a private release or SAMPLE_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_source:
+        description: 'packed APK source'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - secret
+      release_tag:
+        description: 'release tag when apk_source=release'
+        required: false
+        default: 'packed-1.17.6'
+      release_asset:
+        description: 'asset name when apk_source=release'
+        required: false
+        default: 'ycMob_1.17.6_ycsite.apk'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python deps
+        run: python3 -m pip install --quiet androguard pycryptodome lxml
+
+      - name: Fetch sample
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p samples
+          if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
+            gh release download "${{ github.event.inputs.release_tag }}" \
+              -R "${{ github.repository }}" \
+              -p "${{ github.event.inputs.release_asset }}" \
+              -O "samples/${{ github.event.inputs.release_asset }}"
+          else
+            : "${SAMPLE_URL:=${{ secrets.SAMPLE_URL }}}"
+            curl -fL --retry 3 -o "samples/sample.apk" "${SAMPLE_URL}"
+          fi
+          ls -l samples
+
+      - name: Quickscan
+        env:
+          SAMPLE_APK: ${{ github.event.inputs.apk_source == 'release' && format('samples/{0}', github.event.inputs.release_asset) || 'samples/sample.apk' }}
+          OUT_DIR: work/static
+        run: |
+          python3 static-analysis/apk_quickscan.py
+          python3 static-analysis/ijiami_inventory.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: static-${{ github.run_id }}
+          path: work/static/
+          if-no-files-found: warn
+          retention-days: 14

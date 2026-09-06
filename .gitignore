@@ -1,0 +1,48 @@
+# Youcine-RE - never commit samples, dumps, or tool binaries.
+
+# samples and dumps
+*.apk
+*.ap_
+*.dex
+*.so
+*.aab
+*.jar
+dumped/
+dexs/
+work/
+jadx-out/
+apktool-out/
+ghidra-proj*/
+samples/
+*.keystore
+*.jks
+*.pk8
+
+# analysis noise
+*.symbols.txt
+*.xref.txt
+*.analyze.log
+*.decompiled.c
+__pycache__/
+*.pyc
+*.log
+
+# downloaded tools (tools/setup_env.sh)
+tools/jdk*/
+tools/ghidra_*/
+tools/jadx*/
+tools/apktool.jar
+tools/platform-tools/
+tools/frida-server*
+tools/*.zip
+tools/*.tar.gz
+tools/*.tgz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+.env
+.env.*
