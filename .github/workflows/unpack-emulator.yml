@@ -52,7 +52,7 @@ permissions:
 jobs:
   unpack-macos-tcg:
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 170
     outputs:
       dex_count: ${{ steps.count_arm.outputs.dex_count }}
     env:
@@ -67,6 +67,12 @@ jobs:
           python-version: '3.11'
 
       - uses: android-actions/setup-android@v3
+
+      - name: "Restore arm64 AVD snapshot (faster boots on repeat runs)"
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/.android/avd
+          key: arm-tcg-avd-v1
 
       - name: SDK + arm64 image + AVD
         env:
@@ -100,13 +106,13 @@ jobs:
           fi
           sha256sum work/packed.apk | tee work/apk.sha256
 
-      - name: Boot arm64 TCG emulator (up to 45 min)
+      - name: Boot arm64 TCG emulator (up to 95 min)
         run: |
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           nohup emulator -avd youcine-tcg -no-window -gpu swiftshader_indirect \
             -noaudio -no-boot-anim -camera-back none -accel off -port 5554 \
-            > work/emulator.log 2>&1 &
-          for i in $(seq 1 270); do
+            -no-metrics > work/emulator.log 2>&1 &
+          for i in $(seq 1 570); do
             v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
             sleep 10
