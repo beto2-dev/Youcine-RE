@@ -127,6 +127,14 @@ jobs:
             --out work/dump-build-signed.apk work/dump-build-aligned.apk || true
           ls -l work/ || true
 
+      - name: "Build libstdc++.so stub (x86 32-bit)"
+        run: |
+          sudo apt-get update -qq >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq gcc-multilib >/dev/null 2>&1 || true
+          echo 'int ijiami_stub_marker;' | gcc -shared -nostdlib -m32 -o work/libstddcxx.so -xc - || true
+          file work/libstddcxx.so 2>/dev/null || true
+          ls -l work/libstddcxx.so || true
+
       - name: Boot emulator and dump (original APK pinned to armeabi-v7a)
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -140,19 +148,24 @@ jobs:
             adb root || true
             sleep 5
             adb shell getprop ro.product.cpu.abilist || true
+            adb shell "ls -la /system/lib/libstdc++.so /system/lib64/libstdc++.so 2>/dev/null || echo NO_SYSTEM_LIBSTDCXX" || true
+            adb shell "cat /system/etc/public.libraries.txt 2>/dev/null | head -30" || true
             adb install -r -g --abi armeabi-v7a work/packed.apk || true
-            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|secondaryCpuAbi' | head -5" || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|secondaryCpuAbi|legacyNativeLibraryDir' | head -5" || true
+            adb push work/libstddcxx.so "$(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/arm/libstdc++.so" || true
+            adb push work/libstddcxx.so "$(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/armeabi-v7a/libstdc++.so" || true
+            adb shell "ls -l $(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/arm/ | head -20" || true
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.2 --pull-app-data || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.0 --pull-app-data || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            adb shell "ls -l /data/data/$APP_ID/files/ 2>/dev/null" || true
+            adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijm|stdc' | head -10" || true
             adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             cp -f work/logcat.txt work/logcat-x86.txt || true
             ls -la dumped/youcine || true
             mkdir -p count
-            echo "dex_count=$(ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ')" > count/dex_count
+            ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
             cat count/dex_count
 
       - name: Collect output
@@ -180,6 +193,7 @@ jobs:
             work/logcat-x86.txt
             work/apk.sha256
             work/dump-build.apk.sha256
+            work/libstddcxx.so
           if-no-files-found: warn
           retention-days: 7
 
