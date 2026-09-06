@@ -1,21 +1,22 @@
 name: Dynamic unpack (emulator)
 
-# Youcine-RE - iJiami dump on an x86_64 emulator.
+# Youcine-RE - iJiami unpack on an x86_64 emulator.
 #
-# PRIMARY PATH (original APK, no modification, signature intact):
-#   pm install --abi armeabi-v7a pins primaryCpuAbi=armeabi-v7a so the app
-#   process is forked from the 32-bit x86 zygote (the google_apis x86_64
-#   image ships zygote32 with abilist x86,armeabi-v7a,armeabi and
-#   libndk_translation). In that 32-bit process the iJiami stub's ld()
-#   reads /system/bin/linker (32-bit x86, e_machine=EM_386) -> "x86",
-#   il() sees a 32-bit process -> extracts assets/ijm_lib/x86/libexec.so
-#   which runs as NATIVE x86 code (no binary translation), and the
-#   signature check passes because the APK is untouched.
+# FULLY DIAGNOSED CAUSAL CHAIN (see docs/en/06-dynamic-unpack.md):
+#   1. armeabi-v7a install -> FULL ARM process (/system/bin/arm/app_process,
+#      everything under ndk_translation) -> x86 libexec rejected (EM_386 vs
+#      EM_ARM); arm64 libexec runs translated and SecLLVM self-decryption
+#      fails -> s.h.e.l.l.N.al never registered.
+#   2. Pure x86_64 dump-build (libexec.so + libexecmain.so load NATIVELY,
+#      proven with frida) is SIGKILLed by iJiami's signature check using
+#      RAW SYSCALLS (bypasses libc, so frida libc replacement is useless).
 #
-# EVIDENCE PATH (dump-build): stripping lib/arm* forces a pure x86_64
-# process and the stub extracts ijm_lib/x86_64/libexec.so natively, but
-# the re-signed APK is SIGKILLed ~0.2s after start by iJiami's anti-tamper
-# signature verification (run 34046807813) - kept for documentation.
+# THE FIX: unpack/trace_guard.c (built with the NDK, runs as root on the
+# device) PTRACE_ATTACHes to the app the moment it appears and rewrites
+# kill/tgkill/exit/exit_group SYSCALLS to getpid. The tamper suicide is
+# neutralized, decryption proceeds, and after the post-decrypt crash the
+# runtime's exit is blocked too - the process hangs ALIVE with the
+# decrypted DEX still mapped for the external memdump.
 #
 # The rebuild job restores the real Application class, drops packer
 # assets, swaps in the dumped classes*.dex, zipaligns, signs and publishes
@@ -127,15 +128,15 @@ jobs:
             --out work/dump-build-signed.apk work/dump-build-aligned.apk || true
           ls -l work/ || true
 
-      - name: "Build libstdc++.so stub (x86 32-bit)"
+      - name: "Build trace_guard (NDK x86_64)"
         run: |
-          sudo apt-get update -qq >/dev/null 2>&1 || true
-          sudo apt-get install -y -qq gcc-multilib >/dev/null 2>&1 || true
-          echo 'int ijiami_stub_marker;' | gcc -shared -nostdlib -m32 -o work/libstddcxx.so -xc - || true
-          file work/libstddcxx.so 2>/dev/null || true
-          ls -l work/libstddcxx.so || true
+          sdkmanager "ndk;26.3.11579264" > /dev/null || true
+          CLANG="$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          "$CLANG" --target=x86_64-linux-android24 -O2 -o work/trace_guard unpack/trace_guard.c
+          file work/trace_guard || true
+          ls -l work/trace_guard
 
-      - name: Boot emulator and dump (original APK pinned to armeabi-v7a)
+      - name: Boot emulator and dump (dump-build + ptrace syscall guard)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ github.event.inputs.api_level || '30' }}
@@ -147,19 +148,20 @@ jobs:
           script: |
             adb root || true
             sleep 5
-            adb shell getprop ro.product.cpu.abilist || true
-            adb shell "ls -la /system/lib/libstdc++.so /system/lib64/libstdc++.so 2>/dev/null || echo NO_SYSTEM_LIBSTDCXX" || true
-            adb shell "cat /system/etc/public.libraries.txt 2>/dev/null | head -30" || true
-            adb install -r -g --abi armeabi-v7a work/packed.apk || true
-            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|secondaryCpuAbi|legacyNativeLibraryDir' | head -5" || true
-            adb push work/libstddcxx.so "$(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/arm/libstdc++.so" || true
-            adb push work/libstddcxx.so "$(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/armeabi-v7a/libstdc++.so" || true
-            adb shell "ls -l $(dirname $(adb shell pm path $APP_ID | head -1 | tr -d '\r' | sed 's/package://'))/lib/arm/ | head -20" || true
+            adb push work/trace_guard /data/local/tmp/trace_guard || true
+            adb shell "chmod 755 /data/local/tmp/trace_guard" || true
+            adb shell "rm -f /data/local/tmp/yc_guard.pid /data/local/tmp/guard.log" || true
+            adb shell "setsid /data/local/tmp/trace_guard com.world.youcinemobile 340 > /data/local/tmp/guard.log 2>&1 &" || true
+            sleep 1
+            adb shell "cat /data/local/tmp/guard.log 2>/dev/null | head -5" || true
+            adb install -r -g work/dump-build-signed.apk || true
+            adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
             adb logcat -c || true
             adb shell am start -n $APP_ID/$LAUNCH || true
-            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.0 --pull-app-data || true
+            python3 unpack/external_memdump.py --app $APP_ID --out-dir dumped/youcine --expect $EXPECT_DEX --timeout 300 --settle 1.0 --no-freeze --pull-app-data || true
             adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-            adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijm|stdc' | head -10" || true
+            adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijm' | head -10" || true
+            adb shell "cat /data/local/tmp/guard.log 2>/dev/null | tail -50" || true
             adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             cp -f work/logcat.txt work/logcat-x86.txt || true
@@ -193,7 +195,7 @@ jobs:
             work/logcat-x86.txt
             work/apk.sha256
             work/dump-build.apk.sha256
-            work/libstddcxx.so
+            work/trace_guard
           if-no-files-found: warn
           retention-days: 7
 
