@@ -34,6 +34,11 @@ on:
         required: true
         default: '30'
         type: string
+      skip_x86:
+        description: 'skip the x86_64 dump-build job (tamper check kills it)'
+        required: false
+        default: false
+        type: boolean
       release_tag:
         default: 'packed-1.17.6'
       release_asset:
@@ -44,6 +49,7 @@ permissions:
 
 jobs:
   unpack-x86:
+    if: ${{ !inputs.skip_x86 }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     outputs:
@@ -155,6 +161,12 @@ jobs:
           grep -E "ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|dlopen|libexec|FATAL" \
             work/logcat.txt | head -30 || true
 
+      - name: Gate (fail job when no dumps)
+        if: always() && steps.count.outputs.dex_count == '0'
+        run: |
+          echo '::error::x86 dump-build produced 0 DEX. Expected: iJiami anti-tamper signature check SIGKILLs the re-signed build (observed ~0.2s after start). Falling back to unpack-arm.'
+          exit 1
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -169,7 +181,7 @@ jobs:
 
   unpack-arm:
     needs: unpack-x86
-    if: always() && needs.unpack-x86.outputs.dex_count == '0'
+    if: always() && (needs.unpack-x86.result == 'failure' || needs.unpack-x86.result == 'skipped')
     runs-on: macos-14
     timeout-minutes: 50
     outputs:
@@ -187,21 +199,20 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: SDK + ARM AVD
+      - name: SDK + ARM image
+        id: armimg
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" > /dev/null
-          IMG=""
           for api in 33 30 31 32 34; do
             if sdkmanager "system-images;android-${api};google_apis;arm64-v8a" "platforms;android-${api}" > /dev/null 2>&1; then
-              IMG="system-images;android-${api};google_apis;arm64-v8a"
-              echo "ARM_API=$api" >> "$GITHUB_ENV"
-              break
+              echo "api=$api" >> "$GITHUB_OUTPUT"
+              echo "using system-images;android-${api};google_apis;arm64-v8a"
+              exit 0
             fi
           done
-          [ -z "$IMG" ] && { echo "::error::no arm64-v8a google_apis image"; exit 1; }
-          echo "using $IMG"
-          echo "no" | avdmanager create avd -n youcine-arm -k "$IMG" -d pixel_4 --force
+          echo "::error::no arm64-v8a google_apis image found"
+          exit 1
 
       - name: Fetch packed APK
         env:
@@ -217,7 +228,7 @@ jobs:
       - name: Boot emulator and dump (native arm64)
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: ${{ env.ARM_API }}
+          api-level: ${{ steps.armimg.outputs.api }}
           arch: arm64-v8a
           avd-name: youcine-arm
           target: google_apis
@@ -247,6 +258,12 @@ jobs:
           echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
           echo "arm dex dumps: ${val:-0}"
 
+      - name: Gate (fail job when no dumps)
+        if: always() && steps.count_arm.outputs.dex_count == '0'
+        run: |
+          echo '::error::arm64 native dump produced 0 DEX; inspect dumps-arm artifact logcat.'
+          exit 1
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -260,7 +277,7 @@ jobs:
 
   rebuild:
     needs: [unpack-x86, unpack-arm]
-    if: always() && (needs.unpack-x86.outputs.dex_count != '0' || needs.unpack-arm.outputs.dex_count != '0')
+    if: always() && (needs.unpack-x86.result == 'success' || needs.unpack-arm.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -281,6 +298,7 @@ jobs:
 
       - name: SDK + apktool
         run: |
+          mkdir -p work dexs
           sdkmanager "build-tools;34.0.0" > /dev/null || true
           curl -fsSL -o work/apktool.jar \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar
