@@ -26,6 +26,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,7 @@
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_frozen = 0;
 static unsigned g_faults = 0;
+static unsigned g_ills = 0;
 
 static void on_alrm(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; g_frozen = 1; }
@@ -267,8 +269,46 @@ int main(int argc, char **argv)
                 ptrace(PTRACE_SYSCALL, t, 0, 0);
                 continue;
             }
+            if (sig == SIGILL) {
+                /* iJiami deliberate ud2 crash: skip the instruction so
+                 * execution falls through the tamper branch (same trick
+                 * that worked for the int3 probes). */
+                struct user_regs_struct regs;
+                if (ptrace(PTRACE_GETREGS, t, 0, &regs) == 0) {
+                    errno = 0;
+                    long word = ptrace(PTRACE_PEEKDATA, t,
+                                       (void *)(uintptr_t)regs.rip, 0);
+                    if (errno == 0) {
+                        unsigned b0 = (unsigned)(word & 0xff);
+                        unsigned b1 = (unsigned)((word >> 8) & 0xff);
+                        if (b0 == 0x0f && b1 == 0x0b) {
+                            regs.rip += 2; /* ud2 is 2 bytes */
+                            ptrace(PTRACE_SETREGS, t, 0, &regs);
+                            g_ills++;
+                            if (g_ills <= 5 || (g_ills % 100000) == 0) {
+                                fprintf(stderr,
+                                        "[guard] tid %d: skipped ud2 at %llx (total %u)\n",
+                                        t, (unsigned long long)regs.rip, g_ills);
+                                fflush(stderr);
+                            }
+                            ptrace(PTRACE_SYSCALL, t, 0, 0);
+                            continue;
+                        }
+                        if (g_ills < 3) {
+                            fprintf(stderr,
+                                    "[guard] tid %d: SIGILL at %llx bytes %02x %02x %02x %02x (not ud2, pinning)\n",
+                                    t, (unsigned long long)regs.rip,
+                                    b0, b1, (unsigned)((word >> 16) & 0xff),
+                                    (unsigned)((word >> 24) & 0xff));
+                            fflush(stderr);
+                        }
+                    }
+                }
+                ptrace(PTRACE_SYSCALL, t, 0, 0);
+                continue;
+            }
             if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS ||
-                sig == SIGFPE || sig == SIGILL) {
+                sig == SIGFPE) {
                 /* Deliberate crash (anti-tamper ladder step): suppress the
                  * signal. The faulting instruction re-executes and faults
                  * again in a tight loop - the thread burns one core but the
