@@ -72,7 +72,7 @@ def strip_ijiami_assets(decoded: Path) -> None:
         shutil.rmtree(ijm_lib)
 
 
-def collect_dex(dump_dir: Path) -> list[tuple[str, Path]]:
+def collect_dex(dump_dir: Path, extra_dex: list[str]) -> list[tuple[str, Path]]:
     ordered = []
     names = ["classes.dex"] + [f"classes{i}.dex" for i in range(2, 16)]
     for name in names:
@@ -80,11 +80,28 @@ def collect_dex(dump_dir: Path) -> list[tuple[str, Path]]:
         if p.is_file():
             ordered.append((name, p))
     if ordered:
-        return ordered
-    extras = sorted(dump_dir.glob("*.dex"))
+        pass
+    else:
+        extras = sorted(dump_dir.glob("*.dex"))
+        for i, p in enumerate(extras):
+            name = "classes.dex" if i == 0 else f"classes{i + 1}.dex"
+            ordered.append((name, p))
+    # appended AFTER the real dexes: the no-op s.h.e.l.l.C stub defuses
+    # the packer's injected <clinit> kill-switches (run 34135095450:
+    # FacebookInitProvider.<clinit> -> s.h.e.l.l.C.i() is a native
+    # trampoline that requires files/libijmDataEncryption.so, extracted
+    # only by the packer Application we removed; a plain-Java no-op C
+    # makes every injected call harmless)
+    for i, p in enumerate(extra_dex):
+        n = len(ordered) + i + 1
+        ordered.append((f"classes{n}.dex", Path(p)))
+    # dedupe names (paranoia)
+    seen_names = set()
     out = []
-    for i, p in enumerate(extras):
-        name = "classes.dex" if i == 0 else f"classes{i + 1}.dex"
+    for name, p in ordered:
+        if name in seen_names:
+            continue
+        seen_names.add(name)
         out.append((name, p))
     return out
 
@@ -177,9 +194,13 @@ def main() -> int:
     ap.add_argument("--keystore", required=True)
     ap.add_argument("--storepass", default="android")
     ap.add_argument("--work-dir", default="")
+    ap.add_argument("--extra-dex", action="append", default=[],
+                    help="additional .dex to append (e.g. the no-op "
+                         "s.h.e.l.l.C stub that defuses injected "
+                         "packer kill-switches)")
     args = ap.parse_args()
 
-    dex_files = collect_dex(Path(args.dump_dir))
+    dex_files = collect_dex(Path(args.dump_dir), args.extra_dex)
     if not dex_files:
         raise SystemExit("no DEX in dump-dir")
 

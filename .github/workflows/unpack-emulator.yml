@@ -726,6 +726,23 @@ jobs:
             --dump-dir "$DUMPDIR" --out-dir dexs --min-size 65536 || true
           ls -la dexs/ || true
           if ls dexs/*.dex >/dev/null 2>&1; then
+            # no-op s.h.e.l.l.C stub: the decrypted dexes carry injected
+            # <clinit> kill-switches (FacebookInitProvider -> s.h.e.l.l.C.i,
+            # a native trampoline that needs files/libijmDataEncryption.so
+            # which only the removed packer Application extracts). A plain
+            # Java no-op makes every injected call harmless (run 34135095450).
+            mkdir -p work/stubsrc/s/h/e/l/l work/stubclasses work/stubdex
+            cat > work/stubsrc/s/h/e/l/l/C.java <<'JAVA'
+            package s.h.e.l.l;
+            public class C {
+                public static void i(int i) {}
+            }
+            JAVA
+            javac -source 8 -target 8 -d work/stubclasses \
+              work/stubsrc/s/h/e/l/l/C.java
+            "$ANDROID_HOME/build-tools/34.0.0/d8" --min-api 21 \
+              --output work/stubdex work/stubclasses/s/h/e/l/l/*.class
+            ls -la work/stubdex/classes.dex
             keytool -genkeypair -keystore work/re.keystore -storepass android \
               -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
@@ -734,7 +751,8 @@ jobs:
               --dump-dir dexs \
               --out work/youcine-1.17.6-unpacked.apk \
               --keystore work/re.keystore \
-              --storepass android
+              --storepass android \
+              --extra-dex work/stubdex/classes.dex
             sha256sum work/youcine-1.17.6-unpacked.apk | tee work/unpacked.sha256
             gh release create unpacked-1.17.6 \
               --title "Unpacked research build 1.17.6" \
