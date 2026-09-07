@@ -145,10 +145,53 @@ if [ -n "$VENDOR_PROP" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. create the real container, cp the patched props in, THEN start
+# 3. CONTROL container first (pristine, NO build.prop patch, NO /data mount):
+#    run 34120302465: docker logs were EMPTY and adb never connected. Two
+#    suspects: (a) redroid env/kernel issue, (b) OUR build.prop patch killing
+#    init. The control container isolates them. It also runs with --tty:
+#    Android init logs to /dev/console, which docker routes to the pty -
+#    WITHOUT -t the console writes go nowhere and 'docker logs' stays empty
+#    even while the container is alive and booting.
+#    apparmor=unconfined per redroid docs (Ubuntu hosts run AppArmor).
 # ---------------------------------------------------------------------------
-docker create --name youcine-re --privileged -p 5555:5555 \
-  -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE"
+docker rm -f yc-control >/dev/null 2>&1 || true
+mkdir -p work/redroid-control-data
+docker run -d --tty --privileged --security-opt apparmor=unconfined \
+  --name yc-control -p 5556:5555 \
+  -v "$PWD/work/redroid-control-data:/data" "$REDROID_IMAGE" || {
+  echo "::error::docker run control container failed"
+  exit 1
+}
+CONTROL_OK=""
+for i in $(seq 1 60); do  # 60 x 5s = 300s: first boot formats /data
+  adb connect localhost:5556 >/dev/null 2>&1 || true
+  ST=$(adb -s localhost:5556 get-state 2>/dev/null | tr -d '\r')
+  [ "$ST" = "device" ] && CONTROL_OK=1 && break
+  if [ $((i % 6)) -eq 0 ]; then
+    docker inspect --format "control: status={{.State.Status}} exit={{.State.ExitCode}}" yc-control 2>/dev/null || true
+    docker logs --tail 8 yc-control 2>&1 || true
+  fi
+  sleep 5
+done
+if [ -z "$CONTROL_OK" ]; then
+  docker inspect --format "control final: status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}" yc-control 2>/dev/null || true
+  docker logs --tail 120 yc-control > work/docker-control.txt 2>&1 || true
+  tail -50 work/docker-control.txt || true
+  sudo dmesg 2>/dev/null | tail -40 || true
+  echo "::error::PRISTINE redroid control container never became adb-reachable - environment/kernel issue, NOT the build.prop patch (see work/docker-control.txt)"
+  exit 1
+fi
+echo "== control container is adb-reachable - redroid works on this kernel =="
+docker logs --tail 12 yc-control 2>&1 || true
+docker rm -f --time 5 yc-control >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# 4. main container: docker create -> cp patched props in -> docker start
+#    (--tty so init's /dev/console output lands in docker logs)
+# ---------------------------------------------------------------------------
+docker create --tty --name youcine-re --privileged \
+  --security-opt apparmor=unconfined \
+  -p 5555:5555 -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE"
 docker cp work/system-build.prop youcine-re:/system/build.prop
 [ -n "$VENDOR_PROP" ] && docker cp "$VENDOR_PROP" youcine-re:/vendor/build.prop
 docker start youcine-re || {
@@ -158,26 +201,47 @@ docker start youcine-re || {
 }
 
 sleep 5
-echo "== docker logs (first boot, t=5s) =="
+echo "== docker logs (first boot, t=5s; --tty so console output is visible) =="
 docker logs --tail 20 youcine-re 2>&1 || true
 
 # ---------------------------------------------------------------------------
-# 4. wait for adb + full boot
+# 5. wait for adb + full boot (300s: first boot formats the /data volume)
 # ---------------------------------------------------------------------------
 DEV=localhost:5555
 CONNECTED=""
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do  # 60 x 5s = 300s
   adb connect "$DEV" >/dev/null 2>&1 || true
   ST=$(adb -s "$DEV" get-state 2>/dev/null | tr -d '\r')
   if [ "$ST" = "device" ]; then CONNECTED=1; break; fi
-  echo "adb connect attempt $i of 30: state='$ST'"
-  docker logs --tail 4 youcine-re 2>&1 || true
+  if [ $((i % 6)) -eq 0 ]; then
+    echo "adb connect attempt $i of 60: state='$ST'"
+    docker inspect --format "main: status={{.State.Status}} exit={{.State.ExitCode}}" youcine-re 2>/dev/null || true
+    docker logs --tail 6 youcine-re 2>&1 || true
+  fi
   sleep 5
 done
 if [ -z "$CONNECTED" ]; then
   docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
-  echo "::error::adb never reached $DEV within 150s - redroid container did not come up"
-  exit 1
+  docker inspect --format "main final: status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}" youcine-re 2>/dev/null || true
+  echo "::warning::patched (docker-cp build.prop) container never became adb-reachable; the control container DID - falling back to a pristine container + runtime property-area patching"
+  docker rm -f --time 5 youcine-re >/dev/null 2>&1 || true
+  docker run -d --tty --privileged --security-opt apparmor=unconfined \
+    --name youcine-re -p 5555:5555 \
+    -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE" || {
+    echo "::error::fallback docker run failed"
+    exit 1
+  }
+  for i in $(seq 1 60); do
+    adb connect "$DEV" >/dev/null 2>&1 || true
+    ST=$(adb -s "$DEV" get-state 2>/dev/null | tr -d '\r')
+    [ "$ST" = "device" ] && CONNECTED=1 && break
+    sleep 5
+  done
+  if [ -z "$CONNECTED" ]; then
+    docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
+    echo "::error::fallback pristine container also failed - giving up"
+    exit 1
+  fi
 fi
 
 BOOTED=""
@@ -198,14 +262,77 @@ if [ -z "$BOOTED" ]; then
 fi
 
 sleep 10
-echo "== environment evidence (patched build.prop now live) =="
+echo "== environment evidence =="
 echo "ro.debuggable         = $(adb -s "$DEV" shell getprop ro.debuggable 2>/dev/null | tr -d '\r')"
 echo "ro.secure             = $(adb -s "$DEV" shell getprop ro.secure 2>/dev/null | tr -d '\r')"
 echo "ro.build.fingerprint  = $(adb -s "$DEV" shell getprop ro.build.fingerprint 2>/dev/null | tr -d '\r')"
 echo "ro.product.model      = $(adb -s "$DEV" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
+echo "ro.kernel.qemu        = $(adb -s "$DEV" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r')"
+echo "ro.boot.hardware      = $(adb -s "$DEV" shell getprop ro.boot.hardware 2>/dev/null | tr -d '\r')"
 echo "ro.product.cpu.abilist = $(adb -s "$DEV" shell getprop ro.product.cpu.abilist 2>/dev/null | tr -d '\r')"
-adb -s "$DEV" shell "getprop | grep -iE 'qemu|goldfish|ranchu|debuggable|secure|fingerprint|model|hardware|abilist|tags|build.type' | head -40" \
+echo "/proc/cmdline         = $(adb -s "$DEV" shell cat /proc/cmdline 2>/dev/null | tr -d '\r' | head -c 200)"
+adb -s "$DEV" shell "getprop | grep -iE 'qemu|goldfish|ranchu|redroid|debuggable|secure|fingerprint|model|hardware|abilist|tags|build.type' | head -50" \
   | tee work/props-redroid.txt || true
+
+# ---------------------------------------------------------------------------
+# 5b. runtime property verify-and-fix: if the build.prop patch did not take
+#     (or we are on the pristine fallback container), patch the property
+#     area directly and restart the framework - the same proven technique
+#     as nodebug_flow.sh v5. ro.secure is NOT touched (adbd is already root;
+#     a framework restart must never disturb that).
+# ---------------------------------------------------------------------------
+SET_ARGS=()
+rd_cur() { adb -s "$DEV" shell getprop "$1" 2>/dev/null | tr -d '\r'; }
+fix_prop() {  # name desired
+  local cur desired
+  cur=$(rd_cur "$1"); desired="$2"
+  [ -z "$cur" ] && return 0          # prop absent: nothing to patch
+  [ "$cur" = "$desired" ] && return 0  # already correct
+  SET_ARGS+=(--set "$1=$cur|$desired")
+}
+fix_prop ro.debuggable 0
+fix_prop ro.build.type user
+fix_prop ro.build.tags release-keys
+fix_prop ro.product.build.tags release-keys
+fix_prop ro.product.build.type user
+fix_prop ro.build.fingerprint "$SAMSUNG_FP"
+fix_prop ro.product.build.fingerprint "$SAMSUNG_FP"
+fix_prop ro.bootimage.build.fingerprint "$SAMSUNG_FP"
+fix_prop ro.product.model "SM-G991B"
+fix_prop ro.product.odm.model "SM-G991B"
+fix_prop ro.product.product.model "SM-G991B"
+fix_prop ro.product.system_ext.model "SM-G991B"
+fix_prop ro.product.vendor.model "SM-G991B"
+fix_prop ro.product.brand samsung
+fix_prop ro.product.device o1s
+fix_prop ro.product.name o1sxxx
+fix_prop ro.product.manufacturer samsung
+fix_prop ro.hardware qcom
+fix_prop ro.boot.hardware qcom
+fix_prop ro.kernel.qemu 0
+if [ ${#SET_ARGS[@]} -gt 0 ]; then
+  echo "== runtime property-area patch needed ($((${#SET_ARGS[@]} / 2)) specs) =="
+  ANDROID_SERIAL="$DEV" python3 unpack/patch_props.py "${SET_ARGS[@]}" \
+    || echo "::warning::some runtime prop patches failed"
+  # framework restart so system_server/AMS re-reads ro.debuggable etc.
+  adb -s "$DEV" shell stop || true
+  sleep 5
+  adb -s "$DEV" shell start || true
+  RDY=""
+  for i in $(seq 1 60); do
+    PKG=$(adb -s "$DEV" shell service check package 2>/dev/null | tr -d '\r')
+    ACT=$(adb -s "$DEV" shell service check activity 2>/dev/null | tr -d '\r')
+    echo "$PKG" | grep -q found && echo "$ACT" | grep -q found && RDY=1 && break
+    sleep 3
+  done
+  echo "framework restarted: ready=$RDY ro.debuggable=$(rd_cur ro.debuggable) ro.build.tags=$(rd_cur ro.build.tags) ro.product.model=$(rd_cur ro.product.model)"
+  [ -n "$RDY" ] || echo "::warning::framework not fully ready after restart; proceeding"
+  # refresh evidence after the fix
+  adb -s "$DEV" shell "getprop | grep -iE 'qemu|goldfish|ranchu|redroid|debuggable|secure|fingerprint|model|hardware|abilist|tags|build.type' | head -50" \
+    | tee work/props-redroid-after.txt || true
+else
+  echo "== build.prop patch took effect: no runtime patching needed =="
+fi
 
 # adbd must be root for the /proc/<pid>/mem sweep (ro.secure=0 should do it)
 ID=$(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r')
@@ -245,7 +372,8 @@ adb -s "$DEV" shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|nativeLib
 # 6. launch (retries: Broken pipe / system not ready)
 # ---------------------------------------------------------------------------
 adb -s "$DEV" logcat -c >/dev/null 2>&1 || true
-adb -s "$DEV" shell "setprop debug.ld.app.$APP_ID dlopen" || true
+# NOTE: no setprop debug.ld.app.* here either (same detection-surface call
+# as nodebug v5) - docker logs with --tty + logcat are our evidence.
 for i in 1 2 3; do
   echo "== am start attempt $i =="
   adb -s "$DEV" shell am start -W -n "$APP_ID/$LAUNCH" 2>&1 | head -24 | tee -a work/am-start-redroid.txt || true

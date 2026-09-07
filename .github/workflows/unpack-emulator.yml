@@ -264,10 +264,16 @@ jobs:
             count/
             work/logcat-redroid.txt
             work/docker-redroid.txt
+            work/docker-control.txt
             work/am-start-redroid.txt
             work/ps-after-redroid.txt
             work/maps-app-redroid.txt
             work/dmesg-redroid.txt
+            work/dmesg-host.txt
+            work/pm-path-redroid.txt
+            work/abi-info-redroid.txt
+            work/props-redroid.txt
+            work/props-redroid-after.txt
             work/system-build.prop
             work/vendor-build.prop
             work/packed.apk
