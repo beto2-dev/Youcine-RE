@@ -258,13 +258,13 @@ def extract_cdex(blob: bytes, out_prefix: str, out_dir: Path,
 
 def diagnose_magics(files: list[Path]) -> dict[str, int]:
     """Count raw magic occurrences in the pulled regions (debug evidence)."""
-    counts = {"dex\n": 0, "cdex": 0, "vdex": 0}
+    counts = {"dex": 0, "cdex": 0, "vdex": 0}
     for p in files:
         try:
             blob = p.read_bytes()
         except OSError:
             continue
-        counts["dex\n"] += blob.count(DEX_MAGIC)
+        counts["dex"] += blob.count(DEX_MAGIC)
         counts["cdex"] += blob.count(CDEX_MAGIC)
         counts["vdex"] += blob.count(VDEX_MAGIC)
     return counts
@@ -399,8 +399,8 @@ def main() -> int:
             files = batch_sweep(pid, Path(td))
             print(f"[*] pulled {len(files)} region files", flush=True)
             mag = diagnose_magics(files)
-            print(f"[*] magic occurrences: dex\n={mag['dex\n']} cdex={mag['cdex']} "
-                  f"vdex={mag['vdex']}", flush=True)
+            print("[*] magic occurrences: dex=%d cdex=%d vdex=%d"
+                  % (mag["dex"], mag["cdex"], mag["vdex"]), flush=True)
             save_magic_regions(files, out_dir)
             added = sweep_local(files, out_dir, seen, seen_cdx)
         if len(seen) >= args.expect:
