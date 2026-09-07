@@ -159,6 +159,7 @@ def patch_confusion_dex(dex_files: list[tuple[str, Path]], work: Path) -> None:
 
     for i, (name, p) in enumerate(dex_files):
         out = work / f"confusion-patched-{name}"
+        out.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
             [_sys.executable, str(script), "--dex", str(p), "--out", str(out)],
             capture_output=True,

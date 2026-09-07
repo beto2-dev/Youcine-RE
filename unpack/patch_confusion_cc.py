@@ -199,6 +199,8 @@ def main() -> int:
 
     repair_checksums(data)
     out = Path(args.out) if args.out else src
+    if out != src and out.parent and not out.parent.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(bytes(data))
     print(
         f"[+] wrote {out} ({len(data)} bytes, "
