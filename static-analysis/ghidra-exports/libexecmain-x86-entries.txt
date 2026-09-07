@@ -1,0 +1,305 @@
+==== SYMBOL / FUNCTION MAP (libexecmain.so) ====
+FUNC 00015471 FUN_00015471 size=182 thunk=false
+FUNC 0001552b FUN_0001552b size=89 thunk=false
+FUNC 00031000 __cxa_finalize size=1 thunk=true
+FUNC 00031004 __cxa_atexit size=1 thunk=true
+FUNC 00031008 __stack_chk_fail size=1 thunk=true
+SYM EXTERNAL:00000001 __cxa_finalize Function
+SYM EXTERNAL:00000002 __cxa_atexit Function
+SYM EXTERNAL:00000003 __stack_chk_fail Function
+SYM 00015471 FUN_00015471 Function
+SYM 0001552b FUN_0001552b Function
+SYM 00031000 __cxa_finalize Function
+SYM 00031004 __cxa_atexit Function
+SYM 00031008 __stack_chk_fail Function
+(total functions: 5, symbols listed: 187)
+
+==== DECOMP 000152e8 entry_152e8 (246 bytes)
+
+undefined8 entry_152e8(void)
+
+{
+  byte bVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  int iVar4;
+  undefined4 extraout_EDX;
+  byte *pbVar5;
+  int *unaff_EBX;
+  uint uVar6;
+  uint uVar7;
+  int unaff_EBP;
+  uint uVar8;
+  uint *unaff_ESI;
+  uint *puVar9;
+  byte *pbVar10;
+  bool bVar11;
+  bool bVar12;
+  bool bVar13;
+  byte abStack_4 [4];
+  
+  pbVar10 = abStack_4;
+  FUN_00015471();
+  uVar8 = 0xffffffff;
+  puVar9 = unaff_ESI;
+  do {
+    uVar6 = *puVar9;
+    bVar11 = puVar9 < (uint *)0xfffffffc;
+    puVar9 = puVar9 + 1;
+    bVar12 = CARRY4(uVar6,uVar6) || CARRY4(uVar6 * 2,(uint)bVar11);
+    uVar6 = uVar6 * 2 + (uint)bVar11;
+    do {
+      if (bVar12) {
+        uVar2 = *puVar9;
+        puVar9 = (uint *)((int)puVar9 + 1);
+        *pbVar10 = (byte)uVar2 ^ 0xc;
+        pbVar10 = pbVar10 + 1;
+      }
+      else {
+        uVar2 = 1;
+        do {
+          do {
+            bVar11 = CARRY4(uVar6,uVar6);
+            uVar7 = uVar6 * 2;
+            if (uVar7 == 0) {
+              uVar6 = *puVar9;
+              bVar12 = puVar9 < (uint *)0xfffffffc;
+              puVar9 = puVar9 + 1;
+              bVar11 = CARRY4(uVar6,uVar6) || CARRY4(uVar6 * 2,(uint)bVar12);
+              uVar7 = uVar6 * 2 + (uint)bVar12;
+            }
+            uVar2 = uVar2 * 2 + (uint)bVar11;
+            uVar6 = uVar7 * 2;
+          } while (!CARRY4(uVar7,uVar7));
+          if (uVar6 != 0) break;
+          uVar7 = *puVar9;
+          bVar11 = puVar9 < (uint *)0xfffffffc;
+          puVar9 = puVar9 + 1;
+          uVar6 = uVar7 * 2 + (uint)bVar11;
+        } while (!CARRY4(uVar7,uVar7) && !CARRY4(uVar7 * 2,(uint)bVar11));
+        if (2 < uVar2) {
+          uVar8 = *puVar9;
+          puVar9 = (uint *)((int)puVar9 + 1);
+          uVar8 = CONCAT31((int3)uVar2 + -3,(byte)uVar8) ^ 0xffffffff;
+          if (uVar8 == 0) {
+            uVar3 = 0;
+            if (puVar9 != (uint *)((int)unaff_ESI + unaff_EBP)) {
+              uVar3 = 0xffffffff;
+            }
+            *unaff_EBX = (int)pbVar10 - (int)abStack_4;
+            return CONCAT44(extraout_EDX,uVar3);
+          }
+        }
+        bVar11 = CARRY4(uVar6,uVar6);
+        uVar6 = uVar6 * 2;
+        if (uVar6 == 0) {
+          uVar6 = *puVar9;
+          bVar12 = puVar9 < (uint *)0xfffffffc;
+          puVar9 = puVar9 + 1;
+          bVar11 = CARRY4(uVar6,uVar6) || CARRY4(uVar6 * 2,(uint)bVar12);
+          uVar6 = uVar6 * 2 + (uint)bVar12;
+        }
+        bVar12 = CARRY4(uVar6,uVar6);
+        uVar6 = uVar6 * 2;
+        if (uVar6 == 0) {
+          uVar6 = *puVar9;
+          bVar13 = puVar9 < (uint *)0xfffffffc;
+          puVar9 = puVar9 + 1;
+          bVar12 = CARRY4(uVar6,uVar6) || CARRY4(uVar6 * 2,(uint)bVar13);
+          uVar6 = uVar6 * 2 + (uint)bVar13;
+        }
+        iVar4 = (uint)bVar11 * 2 + (uint)bVar12;
+        if (iVar4 == 0) {
+          iVar4 = 1;
+          do {
+            do {
+              bVar11 = CARRY4(uVar6,uVar6);
+              uVar2 = uVar6 * 2;
+              if (uVar2 == 0) {
+                uVar6 = *puVar9;
+                bVar12 = puVar9 < (uint *)0xfffffffc;
+                puVar9 = puVar9 + 1;
+                bVar11 = CARRY4(uVar6,uVar6) || CARRY4(uVar6 * 2,(uint)bVar12);
+                uVar2 = uVar6 * 2 + (uint)bVar12;
+              }
+              iVar4 = iVar4 * 2 + (uint)bVar11;
+              uVar6 = uVar2 * 2;
+            } while (!CARRY4(uVar2,uVar2));
+            if (uVar6 != 0) break;
+            uVar2 = *puVar9;
+            bVar11 = puVar9 < (uint *)0xfffffffc;
+            puVar9 = puVar9 + 1;
+            uVar6 = uVar2 * 2 + (uint)bVar11;
+          } while (!CARRY4(uVar2,uVar2) && !CARRY4(uVar2 * 2,(uint)bVar11));
+          iVar4 = iVar4 + 2;
+        }
+        uVar2 = iVar4 + 1 + (uint)(uVar8 < 0xfffff300);
+        pbVar5 = pbVar10 + uVar8;
+        if (uVar8 < 0xfffffffd) {
+          do {
+            uVar3 = *(undefined4 *)pbVar5;
+            pbVar5 = pbVar5 + 4;
+            *(undefined4 *)pbVar10 = uVar3;
+            pbVar10 = pbVar10 + 4;
+            bVar11 = 3 < uVar2;
+            uVar2 = uVar2 - 4;
+          } while (bVar11 && uVar2 != 0);
+          pbVar10 = pbVar10 + uVar2;
+        }
+        else {
+          do {
+            bVar1 = *pbVar5;
+            pbVar5 = pbVar5 + 1;
+            *pbVar10 = bVar1;
+            pbVar10 = pbVar10 + 1;
+            uVar2 = uVar2 - 1;
+          } while (uVar2 != 0);
+        }
+      }
+      bVar12 = CARRY4(uVar6,uVar6);
+      uVar6 = uVar6 * 2;
+    } while (uVar6 != 0);
+  } while( true );
+}
+
+
+
+==== DECOMP 00011a60 entry_11a60 (5 bytes)
+
+char entry_11a60(void)
+
+{
+  char in_AL;
+  byte *in_ECX;
+  byte in_DL;
+  
+  *in_ECX = *in_ECX & in_DL;
+  return in_AL + 'W';
+}
+
+
+
+==== DECOMP 00015471 FUN_00015471 (182 bytes)
+
+undefined4 FUN_00015471(void)
+
+{
+  int *piVar1;
+  int iVar2;
+  int *piVar3;
+  code *pcVar4;
+  uint uVar5;
+  undefined4 *puVar6;
+  int extraout_ECX;
+  uint uVar7;
+  int unaff_EBP;
+  undefined4 *puVar8;
+  int iVar9;
+  byte bVar10;
+  int unaff_retaddr;
+  int aiStack_1c [3];
+  int local_10;
+  int iStack_c;
+  
+  bVar10 = 0;
+  piVar1 = (int *)(unaff_retaddr + -0x19);
+  iVar2 = *piVar1;
+  *(int *)(unaff_EBP + 0x20) = (int)piVar1 + (*(int *)(unaff_retaddr + -0x15) - iVar2);
+  uVar5 = (int)piVar1 + (*(int *)(unaff_retaddr + -0xd) - iVar2);
+  piVar1 = (int *)(uVar5 + 0x1c);
+  iVar2 = *piVar1;
+  uVar7 = uVar5 & 0xfff;
+  iStack_c = *(int *)((int)piVar1 + iVar2 + 8) + uVar7;
+  local_10 = uVar5 - uVar7;
+  aiStack_1c[0] = iStack_c - uVar7;
+  iVar9 = local_10 + uVar7;
+  aiStack_1c[2] = (int)*(byte *)((int)piVar1 + iVar2 + 0x11);
+  aiStack_1c[1] = (int)*(byte *)((int)piVar1 + iVar2 + 0x12);
+  piVar3 = *(int **)((int)piVar1 + iVar2 + 0x10);
+  FUN_0001552b((int)piVar1 + iVar2 + 0x14,*(undefined4 *)((int)piVar1 + iVar2 + 0xc),iVar9);
+  puVar8 = *(undefined4 **)(unaff_EBP + -0x14);
+  pcVar4 = (code *)swi(0x80);
+  puVar6 = (undefined4 *)(*pcVar4)(*(undefined4 *)(unaff_EBP + -0x10),3,0x32,0,0);
+  if (puVar6 != puVar8) {
+    do {
+                    /* WARNING: Do nothing block with infinite loop */
+    } while( true );
+  }
+  puVar8 = *(undefined4 **)(unaff_EBP + -0xc);
+  for (uVar5 = extraout_ECX + 3U >> 2; uVar5 != 0; uVar5 = uVar5 - 1) {
+    *puVar6 = *puVar8;
+    puVar8 = puVar8 + (uint)bVar10 * -2 + 1;
+    puVar6 = puVar6 + (uint)bVar10 * -2 + 1;
+  }
+  (**(code **)(unaff_EBP + -0x28))();
+  *(undefined4 *)((int)aiStack_1c + *piVar3) = 0xc36180cd;
+  if ((short)local_10 != 0) {
+    (*(code *)(iVar9 + 2))();
+  }
+  pcVar4 = (code *)swi(0x80);
+  (*pcVar4)();
+  return 0x5b;
+}
+
+
+
+==== DECOMP 0001552b FUN_0001552b (89 bytes)
+
+undefined1 * FUN_0001552b(undefined4 param_1,undefined4 *param_2,int param_3)
+
+{
+  code *pcVar1;
+  int extraout_ECX;
+  uint uVar2;
+  int iVar3;
+  int in_EDX;
+  int unaff_EBX;
+  int unaff_EBP;
+  undefined4 *puVar4;
+  undefined1 *puVar5;
+  undefined4 *puVar6;
+  byte bVar7;
+  undefined8 uVar8;
+  undefined1 *unaff_retaddr;
+  
+  bVar7 = 0;
+  pcVar1 = (code *)swi(0x80);
+  uVar8 = (*pcVar1)(in_EDX + *(int *)(unaff_retaddr + -4) + unaff_EBX,7,0x22,0);
+  if ((undefined4 *)0xffffefff < (undefined4 *)uVar8) {
+    do {
+                    /* WARNING: Do nothing block with infinite loop */
+    } while( true );
+  }
+  *(undefined8 *)(unaff_EBP + -0xc) = uVar8;
+  puVar4 = *(undefined4 **)(unaff_EBP + -0x14);
+  puVar6 = (undefined4 *)uVar8;
+  for (uVar2 = extraout_ECX + 3U >> 2; uVar2 != 0; uVar2 = uVar2 - 1) {
+    *puVar6 = *puVar4;
+    puVar4 = puVar4 + (uint)bVar7 * -2 + 1;
+    puVar6 = puVar6 + (uint)bVar7 * -2 + 1;
+  }
+  for (uVar2 = param_3 + 3U >> 2; uVar2 != 0; uVar2 = uVar2 - 1) {
+    *puVar6 = *param_2;
+    param_2 = param_2 + (uint)bVar7 * -2 + 1;
+    puVar6 = puVar6 + (uint)bVar7 * -2 + 1;
+  }
+  puVar5 = *(undefined1 **)(unaff_EBP + -0x28);
+  *(undefined4 **)(unaff_EBP + -0x28) = puVar6;
+  iVar3 = *(int *)(puVar5 + -4);
+  for (; iVar3 != 0; iVar3 = iVar3 + -1) {
+    *(undefined1 *)puVar6 = *puVar5;
+    puVar5 = puVar5 + (uint)bVar7 * -2 + 1;
+    puVar6 = (undefined4 *)((int)puVar6 + (uint)bVar7 * -2 + 1);
+  }
+  iVar3 = *(int *)(unaff_retaddr + -4);
+  for (; iVar3 != 0; iVar3 = iVar3 + -1) {
+    *(undefined1 *)puVar6 = *unaff_retaddr;
+    unaff_retaddr = unaff_retaddr + (uint)bVar7 * -2 + 1;
+    puVar6 = (undefined4 *)((int)puVar6 + (uint)bVar7 * -2 + 1);
+  }
+  return puVar5;
+}
+
+
+
+==== SUMMARY: decompiled=4 failed=0 ====

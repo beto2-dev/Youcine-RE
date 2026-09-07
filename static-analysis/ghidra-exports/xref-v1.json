@@ -1,0 +1,86 @@
+{
+ "imp:dlopen": [
+  56000
+ ],
+ "imp:dlsym": [
+  56008
+ ],
+ "imp:__system_property_get": [
+  56032
+ ],
+ "imp:fopen": [
+  56080
+ ],
+ "imp:fgets": [
+  56088
+ ],
+ "imp:access": [
+  56112
+ ],
+ "imp:read": [
+  56248
+ ],
+ "imp:open": [
+  56256
+ ],
+ "imp:stat": [
+  56280
+ ],
+ "imp:getpid": [
+  56296
+ ],
+ "imp:syscall": [
+  56384
+ ],
+ "imp:readlink": [
+  56424
+ ],
+ "imp:opendir": [
+  56496
+ ],
+ "imp:readdir": [
+  56504
+ ],
+ "imp:AAssetManager_open": [
+  56528
+ ],
+ "imp:AAsset_read": [
+  56544
+ ],
+ "imp:ptrace": [
+  56592
+ ],
+ "imp:waitpid": [
+  56600
+ ],
+ "imp:kill": [
+  56608
+ ],
+ "imp:regcomp": [
+  56672
+ ],
+ "imp:prctl": [
+  56704
+ ],
+ "imp:fork": [
+  56712
+ ],
+ "imp:getppid": [
+  56720
+ ],
+ "imp:pthread_create": [
+  56744
+ ],
+ "imp:bsd_signal": [
+  56800
+ ],
+ "imp:dl_iterate_phdr": [
+  56968
+ ],
+ "imp:getenv": [
+  57096
+ ],
+ "jni_onload": [
+  8708
+ ]
+}

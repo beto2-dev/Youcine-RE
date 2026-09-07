@@ -1,0 +1,17 @@
+==== SYMBOL / FUNCTION MAP (libexec.so) ====
+FUNC 00083789 FUN_00083789 size=182 thunk=false
+FUNC 00083843 FUN_00083843 size=89 thunk=false
+FUNC 00108000 __cxa_atexit size=1 thunk=true
+FUNC 00108004 __cxa_finalize size=1 thunk=true
+FUNC 00108008 __stack_chk_fail size=1 thunk=true
+SYM EXTERNAL:00000001 __cxa_atexit Function
+SYM EXTERNAL:00000002 __cxa_finalize Function
+SYM EXTERNAL:00000003 __stack_chk_fail Function
+SYM 00083789 FUN_00083789 Function
+SYM 00083843 FUN_00083843 Function
+SYM 00108000 __cxa_atexit Function
+SYM 00108004 __cxa_finalize Function
+SYM 00108008 __stack_chk_fail Function
+(total functions: 5, symbols listed: 309)
+
+==== SUMMARY: decompiled=0 failed=0 ====

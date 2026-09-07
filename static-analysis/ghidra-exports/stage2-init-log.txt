@@ -1,0 +1,22 @@
+[init_array[41]] __system_property_get('ro.build.version.sdk') -> ''
+[init_array[41]] __system_property_get('ro.build.version.sdk') -> ''
+[init_array[41]] __system_property_get('ro.yunos.version') -> ''
+[init_array[41]] __system_property_get('ro.yunos.hardware') -> ''
+[init_array[41]] dlopen('libc.so') -> fake
+[init_array[41]] dlsym(handle=0x64000000, 'pthread_create') -> 0
+[init_array[41]] __system_property_get('hw_sc.build.os.releasetype') -> ''
+[init_array[44]] UNIMPL import called: sysconf(0x27, 0x0) -> 0
+[init_array[45]] dlopen('libc.so') -> fake
+[init_array[45]] dlsym(handle=0x64000000, 'sigaction') -> 0
+[init_array[53]] int80 syscall 5 (ebx=0xef1d0 ecx=0x0 edx=0x100) -> 0
+[init_array[53]] int80 syscall 3 (ebx=0x0 ecx=0x7eff7e2f edx=0x1) -> 0
+[init_array[53]] int80 syscall 20 (ebx=0xe7aec ecx=0xabe712ad edx=0x1) -> 0
+[init_array[53]] int80 syscall 5 (ebx=0xef1f0 ecx=0x0 edx=0x100) -> 0
+[init_array[53]] UNIMPL import called: __strlen_chk(0xef201, 0xb) -> 0
+[init_array[55]] int80 syscall 5 (ebx=0xef1d0 ecx=0x0 edx=0x100) -> 0
+[init_array[55]] int80 syscall 3 (ebx=0x0 ecx=0x7eff7e0f edx=0x1) -> 0
+[init_array[57]] UNIMPL import called: sysconf(0x27, 0x10028) -> 0
+[init_array[58]] UNIMPL import called: __cxa_atexit(0x75990, 0xf8338) -> 0
+[init_array[58]] UNIMPL import called: sysconf(0x27, 0xf8338) -> 0
+[init_array[61]] UNIMPL import called: __cxa_atexit(0x9e210, 0xf8498) -> 0
+[init_array[62]] UNIMPL import called: getenv(0xf6e07, 0x0) -> 0

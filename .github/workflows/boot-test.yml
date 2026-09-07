@@ -1,10 +1,15 @@
 name: Boot test (unpacked APK)
 
 # Youcine-RE - install the unpacked (packer-stripped) research build on an
-# ARM64 emulator and verify the real application boots:
+# x86_64 emulator and verify the real application boots:
 #   * com.mobile.brasiltv.app.App must be instantiated (no s.h.e.l.l.*)
 #   * SplashAty / MainAty must reach resumed state
 #   * screenshots + logcat are captured as evidence
+#
+# Runs on ubuntu-latest + KVM. The unpacked build has NO packer left, so the
+# debuggable google_apis image is safe here; the app's own ARM libs run
+# under ndk_translation (binary translation), exactly like they would on any
+# x86 Android device.
 #
 # NOTE: android-emulator-runner executes each script line via a separate
 # `sh -c`, so every command must be a single line and end with || true.
@@ -31,11 +36,11 @@ on:
         default: ''
       api_level:
         description: 'preferred API level'
-        default: '33'
+        default: '30'
 
 jobs:
   boot-test:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
       APP_ID: com.world.youcinemobile
@@ -43,22 +48,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm",GROUP="kvm",MODE="0666",OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+
       - uses: android-actions/setup-android@v3
 
-      - name: SDK + ARM image
+      - name: SDK + AVD
         id: bootimg
+        env:
+          API: ${{ github.event.inputs.api_level || '30' }}
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" > /dev/null
-          for api in ${{ github.event.inputs.api_level || '33' }} 33 30 31 32 34; do
-            if sdkmanager "system-images;android-${api};google_apis;arm64-v8a" "platforms;android-${api}" > /dev/null 2>&1; then
-              echo "api=$api" >> "$GITHUB_OUTPUT"
-              echo "using system-images;android-${api};google_apis;arm64-v8a"
-              exit 0
-            fi
-          done
-          echo "::error::no arm64-v8a google_apis image found"
-          exit 1
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-${API};google_apis;x86_64" \
+            "platforms;android-${API}" > /dev/null
+          echo "api=${API}" >> "$GITHUB_OUTPUT"
+          echo "using system-images;android-${API};google_apis;x86_64"
+          echo "no" | avdmanager create avd -n youcine-bt \
+            -k "system-images;android-${API};google_apis;x86_64" \
+            -d pixel_4 --force
 
       - name: Fetch APK
         env:
@@ -74,30 +87,32 @@ jobs:
             curl -fL --retry 3 -o work/test.apk "${{ github.event.inputs.apk_url }}"
           fi
           ls -l work/test.apk
-          shasum -a 256 work/test.apk || true
+          sha256sum work/test.apk || true
 
       - name: Boot and verify
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ steps.bootimg.outputs.api }}
-          arch: arm64-v8a
+          arch: x86_64
+          avd-name: youcine-bt
           target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -accel off
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
             adb wait-for-device || true
             for i in $(seq 1 60); do adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | grep -q 1 && break; sleep 10; done || true
             adb install -r -g work/test.apk || true
+            adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb logcat -c || true
             adb shell am start -W -n $APP_ID/$LAUNCH > work/am_start.txt 2>&1 || true
             sleep 40 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive1.txt || true
             adb shell dumpsys activity activities > work/activities.txt 2>/dev/null || true
-            adb exec-out screencap -p > work/boot_t20.png 2>/dev/null || true
+            adb exec-out screencap -p > work/boot_t40.png 2>/dev/null || true
             sleep 45 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive2.txt || true
             adb shell dumpsys window windows > work/windows.txt 2>/dev/null || true
-            adb exec-out screencap -p > work/boot_t45.png 2>/dev/null || true
+            adb exec-out screencap -p > work/boot_t85.png 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             grep -c "com.mobile.brasiltv" work/activities.txt > work/real_app_refs.txt || echo 0 > work/real_app_refs.txt || true
             grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink" work/logcat.txt > work/crash_lines.txt || true
@@ -115,7 +130,7 @@ jobs:
           cat work/crash_lines.txt 2>/dev/null || echo "(none)"
           echo "== summary =="
           if grep -q "APP_DEAD" work/alive2.txt 2>/dev/null; then
-            echo "::error::app process is NOT alive at t=45s"
+            echo "::error::app process is NOT alive at t=85s"
             exit 1
           fi
           if grep -qE "ResumedActivity.*com\.mobile\.brasiltv|topResumedActivity.*com\.mobile\.brasiltv|mCurrentFocus.*youcinemobile|mFocusedApp.*youcinemobile" work/activities.txt work/windows.txt 2>/dev/null; then

@@ -2,23 +2,32 @@ name: Dynamic unpack (emulator)
 
 # Youcine-RE - iJiami unpack.
 #
-# PRIMARY PATH (unpack-tcg-arm): the ORIGINAL apk on an arm64-v8a
-# system image running under pure TCG emulation on the linux x86_64
-# runner (the emulator ships qemu-system-aarch64 - probe run
-# 34058535954). Everything executes NATIVE ARM: the iJiami signature /
-# content checks pass legitimately, SecLLVM self-decryption works, and
-# the out-of-process /proc memdump never triggers the anti-debug
-# probes. No dump-build, no re-signing, no guards needed.
+# PRIMARY (unpack-nodebug): the ORIGINAL apk on the google_apis x86_64 image
+# booted with `-prop ro.debuggable=0 -prop ro.secure=0`. Run evidence
+# (34044920876 / 34048953559 / 34049784110): on the stock debuggable image
+# every app runs with JDWP open and s.h.e.l.l.N.al silently refuses to
+# register (no linker error, no kill). Boot-time props remove the app
+# debuggable flag while keeping adbd root (ro.secure=0) for the
+# out-of-process /proc/<pid>/mem sweep. The apk is installed with
+# --abi armeabi-v7a so the stub extracts ijm_lib/x86 (NATIVE x86 SecLLVM).
 #
-# DOCUMENTED PATH (unpack-x86, skipped by default): the pure x86_64
-# dump-build loads libexec natively but the packer's content-integrity
-# gate refuses to decrypt a modified APK - its death ladder (raw-syscall
-# kill, int3, ud2, SIGSEGV) is fully neutralized by trace_guard.c but
-# the process stays pinned pre-decrypt. Kept for the research record.
+# SECONDARY (unpack-playstore): BlackDex (GPL-3.0, CodingGay) on the
+# production google_apis_playstore image (ro.debuggable=0, no su, no root
+# needed). BlackDex installs the target from its REAL sourceDir
+# (byte-identical original apk: content + signature gates pass) and dumps
+# the decrypted DEX from inside its own sandbox. BlackDex32 first (sandbox
+# is 32-bit -> ijm_lib/x86 native), BlackDex64 as fallback.
 #
-# rebuild: restores the real Application class, drops packer assets,
-# swaps in the dumped classes*.dex, zipaligns, signs and publishes the
-# 'unpacked-1.17.6' release for the boot-test workflow.
+# DOCUMENTED PATH (unpack-x86, skipped by default): tamper research on the
+# re-signed dump-build - the content-integrity gate refuses to decrypt a
+# modified APK (death ladder neutralized by trace_guard.c; kept as record).
+#
+# unpack-selfhosted-mac (opt-in): full-speed native arm64 emulator on your
+# own Mac runner (HVF works on real hardware).
+#
+# rebuild: restores the real Application class, drops packer assets, swaps
+# in the dumped classes*.dex, zipaligns, signs, publishes the
+# 'unpacked-1.17.6' release and chains the boot-test workflow.
 
 on:
   workflow_dispatch:
@@ -55,11 +64,12 @@ permissions:
   contents: write
 
 jobs:
-  unpack-macos-tcg:
-    runs-on: macos-14
-    timeout-minutes: 170
+  unpack-nodebug:
+    # PRIMARY: original apk, non-debuggable boot props, root memdump.
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
     outputs:
-      dex_count: ${{ steps.count_arm.outputs.dex_count }}
+      dex_count: ${{ steps.count_nd.outputs.dex_count }}
     env:
       APP_ID: com.world.youcinemobile
       LAUNCH: com.mobile.brasiltv.activity.SplashAty
@@ -67,55 +77,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm",GROUP="kvm",MODE="0666",OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - uses: android-actions/setup-android@v3
 
-      - name: "Restore arm64 AVD snapshot (faster boots on repeat runs)"
-        uses: actions/cache@v4
-        with:
-          path: /Users/runner/.android/avd
-          key: arm-tcg-avd-v1
-
-      - name: SDK + arm64 image + AVD
+      - name: SDK + AVD
         env:
           API: ${{ github.event.inputs.api_level || '30' }}
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" > /dev/null
-          # Try the google_apis image first (fuller environment), fall back
-          # to the MUCH lighter AOSP 'default' images - under TCG the GMS
-          # stack dominates boot time, and the decryption dump does not
-          # need Google services at all.
-          IMG=""
-          for cand in \
-            "system-images;android-28;default;arm64-v8a" \
-            "system-images;android-30;default;arm64-v8a" \
-            "system-images;android-27;default;arm64-v8a" \
-            "system-images;android-${API};google_apis;arm64-v8a"; do
-            if sdkmanager "${cand}" "platforms;$(echo ${cand} | sed 's|system-images;||; s|;.*||' | sed 's|android|android|')" > /dev/null 2>&1; then
-              IMG="$cand"
-              break
-            fi
-          done
-          [ -z "$IMG" ] && { echo "::error::no arm64 image found"; exit 1; }
-          echo "USING_IMAGE=$IMG" >> "$GITHUB_ENV"
-          echo "using $IMG"
-          echo "no" | avdmanager create avd -n youcine-tcg \
-            -k "$IMG" -d pixel_4 --force
-          # NOTE: macos-14 runners are Apple Silicon (arm64 hosts) but have
-          # NO Hypervisor.framework entitlement. -accel off forces same-arch
-          # TCG: slow but fully functional NATIVE ARM execution.
-          grep -q "hw.ramSize" ~/.android/avd/youcine-tcg.avd/config.ini || \
-            echo "hw.ramSize=2048" >> ~/.android/avd/youcine-tcg.avd/config.ini
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-${API};google_apis;x86_64" \
+            "platforms;android-${API}" > /dev/null
+          echo "no" | avdmanager create avd -n youcine \
+            -k "system-images;android-${API};google_apis;x86_64" \
+            -d pixel_4 --force
 
       - name: Fetch packed APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p work dumped/youcine
+          mkdir -p work dumped/youcine count
           if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
             gh release download "${{ github.event.inputs.release_tag }}" \
               -R "${{ github.repository }}" \
@@ -126,91 +118,73 @@ jobs:
           fi
           sha256sum work/packed.apk | tee work/apk.sha256
 
-      - name: Boot arm64 TCG emulator (up to 95 min)
-        run: |
-          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-          nohup emulator -avd youcine-tcg -no-window -gpu swiftshader_indirect \
-            -noaudio -no-boot-anim -camera-back none -accel off -port 5554 \
-            -no-metrics > work/emulator.log 2>&1 &
-          for i in $(seq 1 570); do
-            v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-            [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
-            sleep 10
-          done
-          echo "::error::TCG boot timeout"
-          tail -40 work/emulator.log || true
-          exit 1
-
-      - name: Install original APK, launch, dump
-        run: |
-          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-          adb root || true
-          sleep 10
-          adb install -r -g work/packed.apk || true
-          adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
-          adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
-          adb logcat -c || true
-          adb shell am start -n $APP_ID/$LAUNCH || true
-          python3 unpack/external_memdump.py \
-            --app "$APP_ID" \
-            --out-dir dumped/youcine \
-            --expect "$EXPECT_DEX" \
-            --timeout 1500 \
-            --settle 25 \
-            --resweep-gap 60 || true
-          adb shell "ps -A | grep youcine || echo APP_NOT_RUNNING" || true
-          adb shell "cat /proc/$(adb shell pidof $APP_ID | tr -d '\r')/maps 2>/dev/null | grep -E 'libexec|ijiami' | head -10" || true
-          adb pull /data/data/$APP_ID/files/libexec.so dumped/youcine/libexec.extracted.so 2>/dev/null || true
-          adb logcat -d -b main,system,crash > work/logcat-tcg.txt 2>/dev/null || true
-          grep -E "ijiami|s\.h\.e\.l\.l|FATAL|AndroidRuntime" work/logcat-tcg.txt | head -30 || true
-          ls -la dumped/youcine || true
-          mkdir -p count
-          ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
-          cat count/dex_count
+      - name: Boot emulator (non-debuggable props) and dump
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ github.event.inputs.api_level || '30' }}
+          arch: x86_64
+          avd-name: youcine
+          target: google_apis
+          # -prop values are injected at boot and win over build.prop:
+          # apps run non-debuggable (no JDWP) while ro.secure=0 keeps adbd
+          # root for the /proc/<pid>/mem sweep.
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -prop ro.debuggable=0 -prop ro.secure=0
+          disable-animations: true
+          script: bash unpack/nodebug_flow.sh || true
 
       - name: Collect output
-        id: count_arm
+        id: count_nd
         if: always()
         run: |
           val=$(cat count/dex_count 2>/dev/null || echo 0)
           echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
-          echo "tcg-arm dex dumps: ${val:-0}"
+          echo "nodebug dex dumps: ${val:-0}"
 
       - name: Gate (fail job when no dumps)
-        if: always() && steps.count_arm.outputs.dex_count == '0'
+        if: always() && steps.count_nd.outputs.dex_count == '0'
         run: |
-          echo '::error::macOS TCG arm64 native dump produced 0 DEX; inspect the dumps-macos-tcg artifact logcat.'
+          echo '::error::nodebug run produced 0 DEX (see dumps-nodebug artifact: logcat + dmesg-linker + props evidence).'
           exit 1
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dumps-macos-tcg
+          name: dumps-nodebug
           path: |
             dumped/
-            work/logcat-tcg.txt
+            work/logcat-nodebug.txt
+            work/dmesg-linker.txt
+            work/props-evidence.txt
+            work/public-libraries.txt
+            work/default-prop.txt
+            work/abi-info.txt
+            work/ps-after.txt
+            work/maps-app.txt
+            work/packed.apk
             work/apk.sha256
-            work/emulator.log
           if-no-files-found: warn
           retention-days: 7
 
-  unpack-selfhosted-mac:
-    # OPTIONAL completion path: run on YOUR OWN Mac via a self-hosted runner
-    # (Settings -> Actions -> Runners -> New self-hosted runner; labels:
-    # [self-hosted, macOS]). On real hardware Hypervisor.framework works, so
-    # the arm64 emulator runs at FULL SPEED with the ORIGINAL apk - the
-    # cleanest possible dynamic unpack (native ARM, all checks pass).
-    if: ${{ inputs.run_selfhosted }}
-    runs-on: [self-hosted, macOS]
-    timeout-minutes: 60
+  unpack-playstore:
+    # SECONDARY: BlackDex sandbox on the production image (no root needed).
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
     outputs:
-      dex_count: ${{ steps.count_sh.outputs.dex_count }}
+      dex_count: ${{ steps.count_ps.outputs.dex_count }}
     env:
       APP_ID: com.world.youcinemobile
-      LAUNCH: com.mobile.brasiltv.activity.SplashAty
-      EXPECT_DEX: '4'
+      BD32_SHA256: e916ff31bddf746c313d8eee8036e8d8436b7923ec63e2b3e99ab2e68e4b04f1
+      BD64_SHA256: 173a13f8ccb1c523dab8930aa06d0635196dee753bd61e90c8add5f8a018ba59
     steps:
       - uses: actions/checkout@v4
+
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm",GROUP="kvm",MODE="0666",OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
 
       - uses: actions/setup-python@v5
         with:
@@ -218,63 +192,81 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: SDK + arm64 image + AVD
+      - name: SDK + playstore AVD
+        env:
+          API: ${{ github.event.inputs.api_level || '30' }}
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" \
-            "system-images;android-30;google_apis;arm64-v8a" \
-            "platforms;android-30" > /dev/null
-          echo "no" | avdmanager create avd -n youcine-sh \
-            -k "system-images;android-30;google_apis;arm64-v8a" \
+            "system-images;android-${API};google_apis_playstore;x86_64" \
+            "platforms;android-${API}" > /dev/null
+          echo "no" | avdmanager create avd -n youcine-ps \
+            -k "system-images;android-${API};google_apis_playstore;x86_64" \
             -d pixel_4 --force
 
-      - name: Fetch packed APK
+      - name: Fetch packed APK + BlackDex
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p work dumped/youcine
-          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
-            -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+          mkdir -p work dumped/youcine count dumps
+          gh release download "${{ github.event.inputs.release_tag }}" \
+            -R "${{ github.repository }}" \
+            -p "${{ github.event.inputs.release_asset }}" \
+            -O work/packed.apk
+          sha256sum work/packed.apk | tee work/apk.sha256
+          curl -fsSL --retry 3 -o work/blackdex32.apk \
+            https://github.com/CodingGay/BlackDex/releases/download/v3.2/app-BlackDex32.apk
+          curl -fsSL --retry 3 -o work/blackdex64.apk \
+            https://github.com/CodingGay/BlackDex/releases/download/v3.2/app-BlackDex64.apk
+          echo "$BD32_SHA256  work/blackdex32.apk" | sha256sum -c -
+          echo "$BD64_SHA256  work/blackdex64.apk" | sha256sum -c -
 
-      - name: Boot, install ORIGINAL apk, dump
+      - name: Boot playstore emulator (manual)
         run: |
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-          nohup emulator -avd youcine-sh -no-window -gpu swiftshader_indirect \
+          nohup emulator -avd youcine-ps -no-window -gpu swiftshader_indirect \
             -noaudio -no-boot-anim -camera-back none -port 5554 \
             > work/emulator.log 2>&1 &
-          for i in $(seq 1 120); do
+          for i in $(seq 1 90); do
             v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-            [ "$v" = "1" ] && echo "BOOT_OK" && break
+            [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
             sleep 10
           done
-          adb root || true
-          sleep 5
-          adb install -r -g work/packed.apk || true
-          adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
-          adb logcat -c || true
-          adb shell am start -n $APP_ID/$LAUNCH || true
-          python3 unpack/external_memdump.py \
-            --app "$APP_ID" --out-dir dumped/youcine \
-            --expect "$EXPECT_DEX" --timeout 900 --settle 8 || true
-          adb logcat -d -b main,system,crash > work/logcat-selfhosted.txt 2>/dev/null || true
-          mkdir -p count
-          ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
-          cat count/dex_count
+          echo "::warning::playstore boot timeout; continuing anyway"
+          tail -30 work/emulator.log || true
+
+      - name: Drive BlackDex (uiautomator automation, no root)
+        run: bash unpack/playstore_flow.sh || true
 
       - name: Collect output
-        id: count_sh
+        id: count_ps
         if: always()
         run: |
           val=$(cat count/dex_count 2>/dev/null || echo 0)
           echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+          echo "playstore dex dumps: ${val:-0}"
+
+      - name: Gate (fail job when no dumps)
+        if: always() && steps.count_ps.outputs.dex_count == '0'
+        run: |
+          echo '::error::playstore/BlackDex run produced 0 DEX (see dumps-playstore artifact: logcat + blackdex output).'
+          exit 1
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dumps-selfhosted
+          name: dumps-playstore
           path: |
             dumped/
-            work/logcat-selfhosted.txt
+            dumps/
+            work/logcat-playstore.txt
+            work/props-evidence.txt
+            work/abi-info.txt
+            work/bd32-abi.txt
+            work/ps-after.txt
+            work/emulator.log
+            work/packed.apk
+            work/apk.sha256
           if-no-files-found: warn
           retention-days: 7
 
@@ -355,7 +347,6 @@ jobs:
           "$CLANG" --target=x86_64-linux-android24 -O2 -o work/trace_guard unpack/trace_guard.c
           file work/trace_guard || true
           ls -l work/trace_guard
-          # the NDK eats ~2.5 GB; the emulator needs that space for userdata
           rm -rf "$ANDROID_HOME/ndk" "$ANDROID_HOME/.temp" 2>/dev/null || true
           df -h / | tail -1
 
@@ -423,6 +414,7 @@ jobs:
           path: |
             dumped/
             work/logcat-x86.txt
+            work/packed.apk
             work/apk.sha256
             work/dump-build.apk.sha256
             work/trace_guard
@@ -431,9 +423,93 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  unpack-selfhosted-mac:
+    # OPTIONAL completion path: run on YOUR OWN Mac via a self-hosted runner
+    # (Settings -> Actions -> Runners -> New self-hosted runner; labels:
+    # [self-hosted, macOS]). On real hardware Hypervisor.framework works, so
+    # the arm64 emulator runs at FULL SPEED with the ORIGINAL apk.
+    if: ${{ inputs.run_selfhosted }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    outputs:
+      dex_count: ${{ steps.count_sh.outputs.dex_count }}
+    env:
+      APP_ID: com.world.youcinemobile
+      LAUNCH: com.mobile.brasiltv.activity.SplashAty
+      EXPECT_DEX: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + arm64 image + AVD
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-30;google_apis;arm64-v8a" \
+            "platforms;android-30" > /dev/null
+          echo "no" | avdmanager create avd -n youcine-sh \
+            -k "system-images;android-30;google_apis;arm64-v8a" \
+            -d pixel_4 --force
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work dumped/youcine
+          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+
+      - name: Boot, install ORIGINAL apk, dump
+        run: |
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          nohup emulator -avd youcine-sh -no-window -gpu swiftshader_indirect \
+            -noaudio -no-boot-anim -camera-back none -port 5554 \
+            > work/emulator.log 2>&1 &
+          for i in $(seq 1 120); do
+            v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$v" = "1" ] && echo "BOOT_OK" && break
+            sleep 10
+          done
+          adb root || true
+          sleep 5
+          adb install -r -g work/packed.apk || true
+          adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
+          adb logcat -c || true
+          adb shell am start -n $APP_ID/$LAUNCH || true
+          python3 unpack/external_memdump.py \
+            --app "$APP_ID" --out-dir dumped/youcine \
+            --expect "$EXPECT_DEX" --timeout 900 --settle 8 || true
+          adb logcat -d -b main,system,crash > work/logcat-selfhosted.txt 2>/dev/null || true
+          mkdir -p count
+          ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
+          cat count/dex_count
+
+      - name: Collect output
+        id: count_sh
+        if: always()
+        run: |
+          val=$(cat count/dex_count 2>/dev/null || echo 0)
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-selfhosted
+          path: |
+            dumped/
+            work/logcat-selfhosted.txt
+            work/packed.apk
+          if-no-files-found: warn
+          retention-days: 7
+
   rebuild:
-    needs: [unpack-macos-tcg, unpack-x86, unpack-selfhosted-mac]
-    if: always() && (needs.unpack-macos-tcg.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0' || needs.unpack-selfhosted-mac.outputs.dex_count != '0')
+    needs: [unpack-nodebug, unpack-playstore, unpack-x86, unpack-selfhosted-mac]
+    if: always() && (needs.unpack-nodebug.outputs.dex_count > 0 || needs.unpack-playstore.outputs.dex_count > 0 || needs.unpack-x86.outputs.dex_count > 0 || needs.unpack-selfhosted-mac.outputs.dex_count > 0)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -477,12 +553,15 @@ jobs:
         run: |
           set -ex
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
-          APK="dumps-x86/work/packed.apk"
-          [ -f "$APK" ] || APK="dumps/work/packed.apk"
-          # packed apk fallback: fetch from release
-          if [ ! -f "$APK" ]; then
-            gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
-              -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+          APK=""
+          for c in "dumps/work/packed.apk" "dumps/youcine/work/packed.apk" "dumps-x86/work/packed.apk"; do
+            [ -f "$c" ] && APK="$c" && break
+          done
+          if [ -z "$APK" ]; then
+            gh release download "${{ github.event.inputs.release_tag || 'packed-1.17.6' }}" \
+              -R "$GITHUB_REPOSITORY" \
+              -p "${{ github.event.inputs.release_asset || 'ycMob_1.17.6_ycsite.apk' }}" \
+              -O work/packed.apk
             APK="work/packed.apk"
           fi
           mkdir -p dexs
@@ -490,6 +569,9 @@ jobs:
             --dump-dir dumps/youcine --out-dir dexs --min-size 65536 || true
           ls -la dexs/ || true
           if ls dexs/*.dex >/dev/null 2>&1; then
+            keytool -genkeypair -keystore work/re.keystore -storepass android \
+              -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
             python3 unpack/rebuild_unpacked_apk.py \
               --apk "$APK" \
               --dump-dir dexs \
@@ -497,13 +579,14 @@ jobs:
               --keystore work/re.keystore \
               --storepass android
             sha256sum work/youcine-1.17.6-unpacked.apk | tee work/unpacked.sha256
-            # publish for the boot-test workflow
             gh release create unpacked-1.17.6 \
               --title "Unpacked research build 1.17.6" \
               --notes "Packer-stripped research build produced by the dynamic-unpack workflow. See docs/en/06-dynamic-unpack.md." \
               --target "$GITHUB_SHA" || true
             gh release upload unpacked-1.17.6 \
               work/youcine-1.17.6-unpacked.apk work/unpacked.sha256 --clobber || true
+            # chain the boot test against the fresh release
+            gh workflow run boot-test.yml -R "$GITHUB_REPOSITORY" --ref main || true
           else
             echo "::warning::no valid DEX dumps; nothing to rebuild"
             exit 3

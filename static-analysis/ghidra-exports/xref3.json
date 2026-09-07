@@ -1,0 +1,362 @@
+{
+ "imp:dlopen": [
+  [
+   56000,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:dlsym": [
+  [
+   56008,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:__system_property_get": [
+  [
+   56032,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:fopen": [
+  [
+   56080,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:fgets": [
+  [
+   56088,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:access": [
+  [
+   56112,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:memcpy": [
+  [
+   56184,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:mprotect": [
+  [
+   56200,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:munmap": [
+  [
+   56240,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:read": [
+  [
+   56248,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:open": [
+  [
+   56256,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:stat": [
+  [
+   56280,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:getpid": [
+  [
+   56296,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:exit": [
+  [
+   56336,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:siglongjmp": [
+  [
+   56376,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:syscall": [
+  [
+   56384,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:readlink": [
+  [
+   56424,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:fread": [
+  [
+   56440,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:lstat": [
+  [
+   56472,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:opendir": [
+  [
+   56496,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:readdir": [
+  [
+   56504,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:AAssetManager_open": [
+  [
+   56528,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:AAsset_getLength64": [
+  [
+   56536,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:AAsset_read": [
+  [
+   56544,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:ptrace": [
+  [
+   56592,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:waitpid": [
+  [
+   56600,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:kill": [
+  [
+   56608,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:_exit": [
+  [
+   56616,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:sigsetjmp": [
+  [
+   56632,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:regcomp": [
+  [
+   56672,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:prctl": [
+  [
+   56704,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:fork": [
+  [
+   56712,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:getppid": [
+  [
+   56720,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:pthread_create": [
+  [
+   56744,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:sem_wait": [
+  [
+   56760,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:sem_post": [
+  [
+   56776,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:bsd_signal": [
+  [
+   56800,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:wait": [
+  [
+   56816,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:pipe": [
+  [
+   56824,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:getauxval": [
+  [
+   56952,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:dl_iterate_phdr": [
+  [
+   56968,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:abort": [
+  [
+   57056,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:chmod": [
+  [
+   57088,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "imp:getenv": [
+  [
+   57096,
+   null,
+   null,
+   ""
+  ]
+ ],
+ "str:ijiami": [
+  [
+   289885,
+   "FUN_00046b30",
+   289584,
+   ""
+  ]
+ ]
+}
