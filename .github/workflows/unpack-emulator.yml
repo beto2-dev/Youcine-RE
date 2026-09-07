@@ -205,6 +205,7 @@ jobs:
       APP_ID: com.world.youcinemobile
       LAUNCH: com.mobile.brasiltv.activity.SplashAty
       EXPECT_DEX: '4'
+      BD64_SHA256: 173a13f8ccb1c523dab8930aa06d0635196dee753bd61e90c8add5f8a018ba59
     steps:
       - uses: actions/checkout@v4
 
@@ -221,7 +222,7 @@ jobs:
           adb version
           docker version
 
-      - name: Fetch packed APK
+      - name: Fetch packed APK + BlackDex64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -235,6 +236,13 @@ jobs:
             curl -fL --retry 3 -o work/packed.apk "${{ secrets.SAMPLE_URL }}"
           fi
           sha256sum work/packed.apk | tee work/apk.sha256
+          # BlackDex (GPL-3.0, CodingGay) - native-arm64 cookie dump engine:
+          # the only extractor that works when the packer wipes the original
+          # dex buffer after class loading (R34: dex=0 cdex=0 in memory scans
+          # while the app ran real code)
+          curl -fsSL --retry 3 -o work/blackdex64.apk \
+            https://github.com/CodingGay/BlackDex/releases/download/v3.2/app-BlackDex64.apk
+          echo "${BD64_SHA256}  work/blackdex64.apk" | sha256sum -c -
 
       - name: Run redroid flow (native arm64 Android 11)
         run: bash unpack/redroid_flow.sh || true
@@ -262,6 +270,7 @@ jobs:
           path: |
             dumped/
             count/
+            work/blackdex64.apk
             work/logcat-redroid.txt
             work/docker-redroid.txt
             work/docker-control.txt

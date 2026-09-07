@@ -131,14 +131,17 @@ adb shell "getprop | grep -iE 'qemu|debug|secure|tags|fingerprint|model|hardware
 adb logcat -c || true
 
 # ---- launch (retry: system_server needs a moment after the restart) -------
+# R29 (34119615160): 'am start -W' hung for 53 minutes on the translated
+# armeabi-v7a app spawn and the job died at its timeout before the memdump
+# ever ran. Never use -W here and always bound the call.
 echo "== launching $APP_ID/$LAUNCH (up to 3 attempts) =="
 for i in 1 2 3; do
   adb shell service check activity 2>/dev/null | tr -d '\r' | grep -q found || sleep 5
-  OUT=$(adb shell am start -W -n "$APP_ID/$LAUNCH" 2>&1 | tr -d '\r')
+  OUT=$(timeout 90 adb shell am start -n "$APP_ID/$LAUNCH" 2>&1 | tr -d '\r' || echo TIMEOUT)
   { echo "--- attempt $i ---"; echo "$OUT"; } | head -24 | tee -a work/am-start.txt
-  PID=$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')
+  PID=$(timeout 20 adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')
   if [ -n "$PID" ]; then break; fi
-  if echo "$OUT" | grep -qE "Broken pipe|Error type|does not exist|SecurityException|Starting:.*Error"; then
+  if echo "$OUT" | grep -qE "Broken pipe|Error type|does not exist|SecurityException|Starting:.*Error|TIMEOUT"; then
     echo "launch attempt $i failed; waiting 10s before retry"; sleep 10
   elif [ -z "$OUT" ]; then
     echo "launch attempt $i produced no output (adb dead?); retrying"; sleep 10

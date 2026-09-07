@@ -455,6 +455,49 @@ python3 unpack/external_memdump.py \
   --pull-app-data || true
 
 # ---------------------------------------------------------------------------
+# 7b. BLACKDEX STAGE (the definitive extractor for this scenario).
+#     R34 evidence: the app runs REAL code (activities displayed, app native
+#     libs loaded) but the memory sweeps find ZERO dex/cdex magic - the
+#     packer wipes the original dex buffer after class loading, so magic
+#     scanning is blind. BlackDex walks the classloader COOKIE instead
+#     (reflection -> pathList/dexElements/dexFile/mCookie -> native
+#     cookieDumpDex with an embedded ART copy incl. cdex->dex fixDex) and
+#     installs the target from its REAL sourceDir (byte-identical APK: the
+#     content-integrity gate passes). On the x86_64 emulator its sandbox
+#     died in ndk_translation (run 34084986538); on native arm64 redroid
+#     the whole chain - including the iJiami SecLLVM payload - runs
+#     natively. UI automation via blackdex_auto.py (uiautomator, no
+#     confirmation dialogs in v3.2 - one row tap).
+#     Target process must keep running while BlackDex does its dump, so
+#     SIGCONT it if the memdump left it frozen.
+# ---------------------------------------------------------------------------
+if [ -f work/blackdex64.apk ]; then
+  adb -s "$DEV" shell "kill -CONT $(adb -s "$DEV" shell pidof $APP_ID | tr -d '\r') 2>/dev/null" || true
+  adb -s "$DEV" install -r -g work/blackdex64.apk || \
+    echo "::warning::BlackDex64 install failed - continuing to evidence"
+  if adb -s "$DEV" shell pm path top.niunaijun.blackdexa64 >/dev/null 2>&1; then
+    echo "== driving BlackDex64 (uiautomator automation, native arm64 sandbox) =="
+    ANDROID_SERIAL="$DEV" python3 unpack/blackdex_auto.py \
+      --app-id "$APP_ID" \
+      --label "YouCine" \
+      --out-dir dumped/youcine \
+      --serial "$DEV" \
+      --timeout 240 || echo "::warning::blackdex_auto did not complete; see output"
+    echo "== blackdex output =="
+    ls -la dumped/youcine/ 2>/dev/null | head -20 || true
+    adb -s "$DEV" shell "ls -la /storage/emulated/0/Download/dexDump/$APP_ID/ 2>/dev/null" \
+      | tee work/blackdex-device-listing.txt || true
+    adb -s "$DEV" logcat -d | grep -iE "blackdex|BlackBox|cookieDump|DexUtils|fixDex" \
+      | head -40 > work/blackdex-logcat.txt || true
+    [ -s work/blackdex-logcat.txt ] && cat work/blackdex-logcat.txt || true
+  else
+    echo "::warning::BlackDex64 not installed - skipping its stage"
+  fi
+else
+  echo "::warning::work/blackdex64.apk not present - skipping the BlackDex stage"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. evidence capture (ALWAYS - even on failure)
 # ---------------------------------------------------------------------------
 adb -s "$DEV" logcat -d -b main,system,crash > work/logcat-redroid.txt 2>&1 || true
@@ -476,12 +519,12 @@ if [ ! -s work/dmesg-redroid.txt ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 9. count DEX exactly like nodebug_flow.sh (min-size filter drops the
-#    13.6 KB packer stub dex; real dexes are ~10 MB)
+# 9. count DEX from every source (min-size filter drops the 13.6 KB packer
+#    stub dex; real dexes are ~10 MB)
 # ---------------------------------------------------------------------------
 ls -la dumped/youcine || true
 n=0
-for f in dumped/youcine/dex_*.bin dumped/youcine/*.cdex; do
+for f in dumped/youcine/dex_*.bin dumped/youcine/*.cdex dumped/youcine/*.dex; do
   [ -f "$f" ] || continue
   sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
   [ "$sz" -ge 65536 ] && n=$((n+1))
