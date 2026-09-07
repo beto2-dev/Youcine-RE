@@ -25,11 +25,14 @@ ORIG_ACF = "androidx.core.app.CoreComponentFactory"
 # Packer payload to strip: the encrypted dex blob and the SecLLVM
 # engines. NOTE: libijmDataEncryption*.so assets are KEPT - they are
 # the ijm Data-Encryption SDK's runtime libs (com.ijm.dataencryption.
-# DETool copies them to files/ and System.load()s them; the native
-# bodies of methods the packer converted - e.g. com.arialyy.aria.orm.
-# SqlHelper.getDb - live there). The arm/arm64 variants were stripped
-# from the original APK's assets by the packer (it delivers them at
-# runtime); we re-add the captured one via --ijm-lib.
+# DETool copies the variant for the runtime ABI to files/ and
+# System.load()s it; the native bodies of methods the packer converted
+# - e.g. com.arialyy.aria.orm.SqlHelper.getDb - live there). The packed
+# APK ships all four ABI variants in assets/ (default=armeabi-v7a,
+# _x86, _x86_64, _arm64); keep them byte-identical so DETool's ABI
+# probing and CRC check succeed. --ijm-lib only re-adds the arm64
+# variant if it is missing (e.g. rebuilding from a source APK that had
+# it stripped).
 IJIAMI_ASSETS = (
     "ijiami.dat",
     "ijiami.ajm",
@@ -38,16 +41,23 @@ IJIAMI_ASSETS = (
     "af.bin",
 )
 
-# asset names under which the captured arm64 DE lib is bundled: DETool
-# picks by /proc/self/exe + lib64/libart.so probing, which on translated
-# emulators and real arm64 devices both resolve to the '_x86_64'/'_arm64'
-# names - the process is arm64 in both cases, so arm64 bytes under every
-# name is the universally-correct payload.
+# asset name under which the captured arm64 DE lib is re-added when the
+# source APK lacks it. DETool picks the asset by /proc/self/exe
+# (e_machine) + /proc/self/maps (lib64) probing: on x86_64 ->
+# _x86_64.so, on arm32 -> default name, on arm64 -> _arm64.so. Each
+# asset must contain the bytes of ITS OWN ABI (rebuild v3 bundled the
+# captured arm64 lib under every name, which left broken ABI-payload
+# pairs for v7a/x86_64; fixed in v4).
 IJM_LIB_ASSET_NAMES = (
-    "libijmDataEncryption.so",
     "libijmDataEncryption_arm64.so",
-    "libijmDataEncryption_x86_64.so",
 )
+
+# early DE-SDK loader (see unpack/stubs/src/com/youcine/re/
+# BootProvider.java): installed by installContentProviders() BEFORE
+# Application.onCreate, so DETool.loadDEso() runs before App.onCreate
+# -> Aria.init -> SqlHelper.getDb (the first packer-natified method).
+BOOT_PROVIDER_CLASS = "com.youcine.re.BootProvider"
+BOOT_PROVIDER_AUTHORITY = "com.world.youcinemobile.ycre-boot"
 
 
 def run(cmd: list[str]) -> None:
@@ -88,8 +98,9 @@ def strip_ijiami_assets(decoded: Path) -> None:
 
 
 def add_ijm_lib(decoded: Path, ijm_lib: Path) -> None:
-    """Bundle the captured libijmDataEncryption.so (from the runtime
-    appdata.tar evidence) under every DETool asset name."""
+    """Re-add the captured libijmDataEncryption.so (from the runtime
+    appdata.tar evidence) as the _arm64 asset, but only when the source
+    APK does not already ship it."""
     if not ijm_lib.is_file():
         print(f"[!] --ijm-lib {ijm_lib} not found; skipping")
         return
@@ -100,9 +111,69 @@ def add_ijm_lib(decoded: Path, ijm_lib: Path) -> None:
     assets = decoded / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     for name in IJM_LIB_ASSET_NAMES:
-        (assets / name).write_bytes(data)
+        target = assets / name
+        if target.is_file() and target.read_bytes()[:4] == b"\x7fELF":
+            print(f"[+] assets/{name} already present ({target.stat().st_size} "
+                  "bytes); keeping source bytes", flush=True)
+            continue
+        target.write_bytes(data)
         print(f"[+] assets/{name} <- captured DE lib ({len(data)} bytes)",
               flush=True)
+
+
+def inject_boot_provider(path: Path) -> None:
+    """Declare the BootProvider in the apktool-decoded manifest text so
+    it is installed before Application.onCreate (providers always run
+    first) and can load the DE SDK before the first natified method is
+    called."""
+    text = path.read_text(encoding="utf-8")
+    if BOOT_PROVIDER_CLASS in text:
+        print("[+] manifest already declares the BootProvider", flush=True)
+        return
+    idx = text.find("<application")
+    if idx < 0:
+        raise SystemExit("no <application> tag in decoded manifest")
+    gt = text.find(">", idx)
+    if gt < 0:
+        raise SystemExit("malformed <application> tag in decoded manifest")
+    provider = (
+        f'\n        <provider android:name="{BOOT_PROVIDER_CLASS}" '
+        f'android:authorities="{BOOT_PROVIDER_AUTHORITY}" '
+        f'android:exported="false"/>'
+    )
+    text = text[: gt + 1] + provider + text[gt + 1 :]
+    path.write_text(text, encoding="utf-8")
+    print(f"[+] manifest: injected provider {BOOT_PROVIDER_CLASS}", flush=True)
+
+
+def patch_confusion_dex(dex_files: list[tuple[str, Path]], work: Path) -> None:
+    """Run unpack/patch_confusion_cc.py against the dump DEX that carries
+    com.ijiami.residconfusion.ConfusionUtils (the app-embedded signature
+    kill-switch: allowlist MD5 545A...A699 -> HOME + System.exit(0) on the
+    re-signed build). The patched copy replaces the original entry."""
+    script = Path(__file__).resolve().parent / "patch_confusion_cc.py"
+    if not script.is_file():
+        print(f"[!] {script} missing; confusion patch skipped")
+        return
+    import sys as _sys
+
+    for i, (name, p) in enumerate(dex_files):
+        out = work / f"confusion-patched-{name}"
+        r = subprocess.run(
+            [_sys.executable, str(script), "--dex", str(p), "--out", str(out)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0:
+            print(r.stdout, end="", flush=True)
+            dex_files[i] = (name, out)
+            print(f"[+] confusion kill-switch neutralized in {name}", flush=True)
+            return
+        if r.returncode == 2:
+            continue  # ConfusionUtils not in this dex
+        print(r.stdout, r.stderr, flush=True)
+    print("[!] ConfusionUtils not found in any dump DEX; patch not applied",
+          flush=True)
 
 
 def collect_dex(dump_dir: Path, extra_dex: list[str]) -> list[tuple[str, Path]]:
@@ -233,8 +304,17 @@ def main() -> int:
                          "packer kill-switches)")
     ap.add_argument("--ijm-lib", default="",
                     help="captured libijmDataEncryption.so (from the "
-                         "appdata.tar evidence) to bundle as the DE "
-                         "SDK assets")
+                         "appdata.tar evidence) to re-add as the arm64 "
+                         "DE SDK asset when the source APK lacks it")
+    ap.add_argument("--patch-confusion", action="store_true",
+                    help="neutralize the app-embedded iJiami signature "
+                         "kill-switch (com.ijiami.residconfusion."
+                         "ConfusionUtils.cc/e) in the dump DEXes")
+    ap.add_argument("--boot-dex", default="",
+                    help="DEX with com.youcine.re.BootProvider (early "
+                         "DE-SDK loader); also declares the provider in "
+                         "the manifest so it is installed before "
+                         "Application.onCreate")
     args = ap.parse_args()
 
     dex_files = collect_dex(Path(args.dump_dir), args.extra_dex)
@@ -245,11 +325,20 @@ def main() -> int:
     tmp_own = False
     work = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="youcine-rebuild-"))
     tmp_own = not bool(args.work_dir)
+    if args.patch_confusion:
+        patch_confusion_dex(dex_files, work)
+    if args.boot_dex:
+        boot = Path(args.boot_dex)
+        if not boot.is_file():
+            raise SystemExit(f"--boot-dex {boot} not found")
+        dex_files.append((f"classes{len(dex_files) + 1}.dex", boot))
     decoded = work / "decoded"
     if decoded.exists():
         shutil.rmtree(decoded)
     run(["java", "-jar", apktool, "d", "-f", "-s", "-o", str(decoded), str(args.apk)])
     patch_manifest(decoded / "AndroidManifest.xml")
+    if args.boot_dex:
+        inject_boot_provider(decoded / "AndroidManifest.xml")
     strip_ijiami_assets(decoded)
     if args.ijm_lib:
         add_ijm_lib(decoded, Path(args.ijm_lib))

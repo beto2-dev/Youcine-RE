@@ -115,13 +115,15 @@ jobs:
             adb exec-out screencap -p > work/boot_t85.png 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
             grep -c "com.mobile.brasiltv" work/activities.txt > work/real_app_refs.txt || echo 0 > work/real_app_refs.txt || true
-            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink" work/logcat.txt > work/crash_lines.txt || true
+            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption" work/logcat.txt > work/crash_lines.txt || true
             head -40 work/activities.txt || true
 
       - name: Verdict
         run: |
           echo "== am start =="
           cat work/am_start.txt 2>/dev/null || true
+          echo "== DE SDK load evidence (YoucineRE/DETool/System.exit) =="
+          grep -E "YoucineRE|DETool|System\.exit|libijmDataEncryption" work/logcat.txt | head -25 || echo "(none)"
           echo "== alive checks =="
           cat work/alive1.txt work/alive2.txt 2>/dev/null || true
           echo "== real app refs in dumpsys =="

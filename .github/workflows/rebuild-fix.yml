@@ -1,0 +1,170 @@
+name: Rebuild fix (fast loop)
+
+# Youcine-RE - fast iteration on the packer-stripped research build
+# WITHOUT re-running the redroid dump: sources the validated dump DEXes
+# from the existing 'unpacked-1.17.6' release and the original APK from
+# 'packed-1.17.6', then applies the v4 boot fixes:
+#
+#   1. BootProvider (com.youcine.re) declared in the manifest: loads the
+#      iJiami DE SDK (com.ijm.dataencryption.DETool.loadDEso) from a
+#      ContentProvider, which ActivityThread installs BEFORE
+#      Application.onCreate -> Aria.init -> SqlHelper.getDb. In the
+#      packed app the packer's native loader did this; the previous
+#      rebuild v3 never loaded the lib at all (the "signature-gated
+#      registration" verdict was a misdiagnosis of a missing load).
+#   2. patch_confusion_cc.py: neutralizes the app-embedded signature
+#      kill-switch (com.ijiami.residconfusion.ConfusionUtils -> HOME +
+#      System.exit(0) on any re-signed build).
+#   3. keeps the four per-ABI libijmDataEncryption assets byte-identical
+#      from the packed APK (v3 had bundled arm64 bytes under every name).
+#
+# Publishes to the 'unpacked-1.17.6' release (clobber) and chains the
+# boot-test workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain_boot_test:
+        description: 'chain the Boot test workflow afterwards'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APKTOOL_JAR: work/apktool.jar
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + apktool
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          mkdir -p work dexs
+          sdkmanager "build-tools;34.0.0" "platforms;android-30" > /dev/null || true
+          curl -fsSL -o work/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar
+
+      - name: Fetch source releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "ycMob_1.17.6_ycsite.apk" -O work/packed.apk
+          gh release download unpacked-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "youcine-1.17.6-unpacked.apk" -O work/unpacked-prev.apk
+          sha256sum work/packed.apk work/unpacked-prev.apk
+
+      - name: Extract the validated dump DEXes
+        run: |
+          python3 - <<'PY'
+          import zipfile, pathlib
+          z = zipfile.ZipFile("work/unpacked-prev.apk")
+          out = pathlib.Path("dexs")
+          out.mkdir(exist_ok=True)
+          for info in z.infolist():
+              n = info.filename
+              if n.startswith("classes") and n.endswith(".dex") \
+                      and info.file_size >= 65536:
+                  (out / n).write_bytes(z.read(n))
+                  print("[+]", n, info.file_size)
+          PY
+          ls -la dexs/
+
+      - name: Compile stubs (no-op s.h.e.l.l.C + BootProvider)
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          mkdir -p work/stubclasses work/stubdex
+          javac -source 8 -target 8 \
+            -bootclasspath "$ANDROID_HOME/platforms/android-30/android.jar" \
+            -d work/stubclasses \
+            unpack/stubs/src/s/h/e/l/l/C.java \
+            unpack/stubs/src/com/youcine/re/BootProvider.java
+          find work/stubclasses -name '*.class' -print0 | xargs -0 \
+            d8 --min-api 21 \
+            --lib "$ANDROID_HOME/platforms/android-30/android.jar" \
+            --output work/stubdex
+          ls -la work/stubdex/classes.dex
+
+      - name: Rebuild v4 (BootProvider + confusion patch + DE assets)
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          keytool -genkeypair -keystore work/re.keystore -storepass android \
+            -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
+          python3 unpack/rebuild_unpacked_apk.py \
+            --apk work/packed.apk \
+            --dump-dir dexs \
+            --out work/youcine-1.17.6-unpacked.apk \
+            --keystore work/re.keystore \
+            --storepass android \
+            --boot-dex work/stubdex/classes.dex \
+            --patch-confusion \
+            --work-dir work/build
+
+      - name: Sanity checks
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          unzip -l work/youcine-1.17.6-unpacked.apk | \
+            grep -E 'classes[0-9]*\.dex|libijmDataEncryption|AndroidManifest' || true
+          apksigner verify --print-certs work/youcine-1.17.6-unpacked.apk | head -5
+          [ -f work/build/confusion-patched-classes.dex ] && \
+            echo "confusion patch: applied" || echo "confusion patch: MISSING"
+          python3 - <<'PY'
+          import zipfile
+          z = zipfile.ZipFile("work/youcine-1.17.6-unpacked.apk")
+          d = z.read("classes.dex")
+          assert d[0x9bcbc0:0x9bcbc4] == bytes.fromhex("12100f00"), "cc patch missing"
+          assert d[0x9bccc4:0x9bccc6] == bytes.fromhex("0e00"), "e patch missing"
+          print("[+] ConfusionUtils cc/e patches verified inside the APK")
+          # binary AXML stores the string pool as UTF-16LE
+          man = z.read("AndroidManifest.xml")
+          probes = (
+              "com.youcine.re.BootProvider",
+              "com.mobile.brasiltv.app.App",
+          )
+          for probe in probes:
+              assert probe.encode("utf-16-le") in man, probe + " missing"
+          print("[+] BootProvider + real Application present in the binary manifest")
+          PY
+
+      - name: Publish + chain boot test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha256sum work/youcine-1.17.6-unpacked.apk | tee work/unpacked.sha256
+          gh release create unpacked-1.17.6 \
+            --title "Unpacked research build 1.17.6" \
+            --notes "Packer-stripped research build (v4: BootProvider DE-SDK load + confusion kill-switch neutralized + per-ABI DE assets). See docs/en/06-dynamic-unpack.md." \
+            --target "$GITHUB_SHA" || true
+          gh release upload unpacked-1.17.6 \
+            work/youcine-1.17.6-unpacked.apk work/unpacked.sha256 --clobber || true
+          if [ "${{ github.event.inputs.chain_boot_test }}" != "false" ]; then
+            gh workflow run boot-test.yml -R "$GITHUB_REPOSITORY" --ref main \
+              -f apk_source=release -f tag=unpacked-1.17.6 \
+              -f apk_asset=youcine-1.17.6-unpacked.apk || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rebuild-fix-${{ github.run_id }}
+          path: |
+            work/build/decoded/AndroidManifest.xml
+            work/build/confusion-patched-classes.dex
+            work/unpacked.sha256
+          if-no-files-found: warn
+          retention-days: 7
