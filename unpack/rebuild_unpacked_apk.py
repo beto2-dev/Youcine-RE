@@ -22,15 +22,30 @@ SHELL_ACF = "s.h.e.l.l.A"
 ORIG_APP = "com.mobile.brasiltv.app.App"
 ORIG_ACF = "androidx.core.app.CoreComponentFactory"
 
+# Packer payload to strip: the encrypted dex blob and the SecLLVM
+# engines. NOTE: libijmDataEncryption*.so assets are KEPT - they are
+# the ijm Data-Encryption SDK's runtime libs (com.ijm.dataencryption.
+# DETool copies them to files/ and System.load()s them; the native
+# bodies of methods the packer converted - e.g. com.arialyy.aria.orm.
+# SqlHelper.getDb - live there). The arm/arm64 variants were stripped
+# from the original APK's assets by the packer (it delivers them at
+# runtime); we re-add the captured one via --ijm-lib.
 IJIAMI_ASSETS = (
     "ijiami.dat",
     "ijiami.ajm",
     "IJMDal.Data",
     "signed.bin",
     "af.bin",
+)
+
+# asset names under which the captured arm64 DE lib is bundled: DETool
+# picks by /proc/self/exe + lib64/libart.so probing, which on translated
+# emulators and real arm64 devices both resolve to the '_x86_64'/'_arm64'
+# names - the process is arm64 in both cases, so arm64 bytes under every
+# name is the universally-correct payload.
+IJM_LIB_ASSET_NAMES = (
     "libijmDataEncryption.so",
     "libijmDataEncryption_arm64.so",
-    "libijmDataEncryption_x86.so",
     "libijmDataEncryption_x86_64.so",
 )
 
@@ -70,6 +85,24 @@ def strip_ijiami_assets(decoded: Path) -> None:
     ijm_lib = assets / "ijm_lib"
     if ijm_lib.exists():
         shutil.rmtree(ijm_lib)
+
+
+def add_ijm_lib(decoded: Path, ijm_lib: Path) -> None:
+    """Bundle the captured libijmDataEncryption.so (from the runtime
+    appdata.tar evidence) under every DETool asset name."""
+    if not ijm_lib.is_file():
+        print(f"[!] --ijm-lib {ijm_lib} not found; skipping")
+        return
+    data = ijm_lib.read_bytes()
+    if data[:4] != b"\x7fELF":
+        print(f"[!] --ijm-lib {ijm_lib} is not an ELF; skipping")
+        return
+    assets = decoded / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    for name in IJM_LIB_ASSET_NAMES:
+        (assets / name).write_bytes(data)
+        print(f"[+] assets/{name} <- captured DE lib ({len(data)} bytes)",
+              flush=True)
 
 
 def collect_dex(dump_dir: Path, extra_dex: list[str]) -> list[tuple[str, Path]]:
@@ -198,6 +231,10 @@ def main() -> int:
                     help="additional .dex to append (e.g. the no-op "
                          "s.h.e.l.l.C stub that defuses injected "
                          "packer kill-switches)")
+    ap.add_argument("--ijm-lib", default="",
+                    help="captured libijmDataEncryption.so (from the "
+                         "appdata.tar evidence) to bundle as the DE "
+                         "SDK assets")
     args = ap.parse_args()
 
     dex_files = collect_dex(Path(args.dump_dir), args.extra_dex)
@@ -214,6 +251,8 @@ def main() -> int:
     run(["java", "-jar", apktool, "d", "-f", "-s", "-o", str(decoded), str(args.apk)])
     patch_manifest(decoded / "AndroidManifest.xml")
     strip_ijiami_assets(decoded)
+    if args.ijm_lib:
+        add_ijm_lib(decoded, Path(args.ijm_lib))
     built = work / "resigned-stub.apk"
     run(["java", "-jar", apktool, "b", str(decoded), "-o", str(built)])
     replaced = work / "replaced.apk"

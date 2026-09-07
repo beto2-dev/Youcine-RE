@@ -739,6 +739,22 @@ jobs:
             "$ANDROID_HOME/build-tools/34.0.0/d8" --min-api 21 \
               --output work/stubdex work/stubclasses/s/h/e/l/l/*.class
             ls -la work/stubdex/classes.dex
+            # captured runtime libijmDataEncryption.so from the redroid
+            # evidence (appdata.tar): the DE SDK's native method bodies
+            # (e.g. com.arialyy.aria.orm.SqlHelper.getDb) live there; the
+            # packer stripped the arm/arm64 asset variants from the APK.
+            IJM_LIB=""
+            for t in "$DUMPDIR/appdata.tar" dumps/youcine/appdata.tar; do
+              if [ -f "$t" ]; then
+                tar -xOf "$t" com.world.youcinemobile/files/libijmDataEncryption.so \
+                  > work/libijmDataEncryption.so 2>/dev/null || true
+                if [ -s work/libijmDataEncryption.so ]; then
+                  IJM_LIB=work/libijmDataEncryption.so
+                  echo "captured DE lib: $(stat -c %s work/libijmDataEncryption.so) bytes from $t"
+                  break
+                fi
+              fi
+            done
             keytool -genkeypair -keystore work/re.keystore -storepass android \
               -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
@@ -748,7 +764,8 @@ jobs:
               --out work/youcine-1.17.6-unpacked.apk \
               --keystore work/re.keystore \
               --storepass android \
-              --extra-dex work/stubdex/classes.dex
+              --extra-dex work/stubdex/classes.dex \
+              ${IJM_LIB:+--ijm-lib "$IJM_LIB"}
             sha256sum work/youcine-1.17.6-unpacked.apk | tee work/unpacked.sha256
             gh release create unpacked-1.17.6 \
               --title "Unpacked research build 1.17.6" \
