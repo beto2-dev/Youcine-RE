@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# nodebug_flow.sh - ORIGINAL apk on a NON-DEBUGGABLE google_apis emulator
-# (ramdisk-patched: ro.debuggable=0, ro.secure=0) with full qemu-signal
-# spoofing.
+# nodebug_flow.sh - ORIGINAL apk on google_apis with the FULL anti-detection
+# stack: property-area spoofing + framework restart + device hiding.
 #
 # Run evidence:
-#   * 34044920876/34048953559/34049784110: s.h.e.l.l.N.al silently refuses
-#     to register on the stock debuggable image (JDWP transport open in
-#     every app). No ro.debuggable/jdwp string exists in the packer's
-#     decrypted strings, but the JDWP thread is still a detectable signal.
-#   * 34081223822: emulator rejects non-qemu -prop; /system remount fails
-#     (overlayfs deps), so build.prop editing is impossible at runtime;
-#     renaming qemu device nodes killed system_server ~55s later.
+#   * 34044920876/34048953559/34049784110/34081223822: s.h.e.l.l.N.al
+#     silently refuses to register (no linker error, no kill) on the stock
+#     image. Packer's decrypted strings show the detection arsenal
+#     (TracerPid, qemu_pipe, ro.kernel.qemu, qemu.* props, su/magisk,
+#     frida, xposed) - and notably NO ro.debuggable/jdwp string, but every
+#     app on the debuggable image runs a JDWP transport thread which the
+#     Thread.getStackTrace sweeps can see.
+#   * 34084634643/34084986538: the API-30 ramdisk has NO default.prop (it
+#     is a 2-stage first_stage_ramdisk with kernel modules); ro.debuggable
+#     is injected by the emulator at boot. Runtime patching + a FRAMEWORK
+#     restart (stop/start) makes system_server re-read the patched value,
+#     so every freshly forked app process is non-debuggable - no JDWP -
+#     without touching any image file. adbd stays root (its decision was
+#     made at boot; a prop value change never demotes it).
 #
-# Countermeasures (this script):
-#   * the workflow pre-patches the ramdisk (ro.debuggable=0 + ro.secure=0)
-#   * unpack/patch_props.py rewrites property values in the shared
-#     /dev/__properties__ area as root: fakes ro.kernel.qemu, init.svc.*,
-#     every qemu.* prop, dev-keys/userdebug fingerprints, ranchu hardware,
-#     ndk_translation markers - immediately visible to fresh readers.
-#   * chmod 000 on qemu/goldfish device nodes early (app opens fail with
-#     EACCES, root processes unaffected) and a late rename right before
-#     launch (existence checks fail; the ~55s system lifetime after the
-#     rename is far more than the dump window needs).
+# Countermeasure layers (in order):
+#   1. patch_props.py rewrites /dev/__properties__ values in place
+#      (ro.debuggable, ro.secure + every qemu/hardware/fingerprint signal)
+#   2. framework restart (stop/start) - AMS re-reads ro.debuggable=0
+#   3. chmod 000 early + late rename of qemu/goldfish device nodes
+#   4. out-of-process SIGSTOP freeze + /proc/<pid>/mem sweep (no ptrace,
+#      no frida - the cleanest possible observation channel)
 set -x
 
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
@@ -31,17 +34,18 @@ mkdir -p work dumped/youcine count
 DBG=$(adb shell getprop ro.debuggable 2>/dev/null | tr -d '\r')
 SEC=$(adb shell getprop ro.secure 2>/dev/null | tr -d '\r')
 echo "boot props: ro.debuggable='$DBG' ro.secure='$SEC'"
-[ "$DBG" = "0" ] || echo "::warning::ramdisk patch did NOT take effect"
 
 adb root >/dev/null 2>&1 || true
 sleep 5
 echo "adb identity: $(adb shell id 2>/dev/null | tr -d '\r' | head -1)"
 echo "SELinux: $(adb shell getenforce 2>/dev/null | tr -d '\r')"
 
-# ---- qemu-signal spoofing (decrypted-string evidence) ---------------------
+# ---- 1. property-area spoofing (decrypted-string evidence) ----------------
 SAMSUNG_FP="samsung/o1sxxx/o1s:11/RP1A.200720.012/G991BXXU5CUL5:user/release-keys"
 GOOGLE_FP="google/sdk_gphone_x86_64/generic_x86_64_arm64:11/RSR1.240422.006/12134477:userdebug/dev-keys"
 python3 unpack/patch_props.py \
+  --set "ro.debuggable=1:0" \
+  --set "ro.secure=1:0" \
   --set "ro.kernel.qemu=1:0" \
   --set "ro.kernel.android.qemud=1:0" \
   --set "init.svc.qemu-props=running:stopped" \
@@ -77,11 +81,29 @@ python3 unpack/patch_props.py \
   --set "init.svc_debug_pid.qemu-props=168:" \
   --set "init.svc_debug_pid.goldfish-logcat=360:" \
   || echo "::warning::some prop patches failed (see output)"
-
+echo "after patch: ro.debuggable=$(adb shell getprop ro.debuggable 2>/dev/null | tr -d '\r') ro.secure=$(adb shell getprop ro.secure 2>/dev/null | tr -d '\r')"
 adb shell "getprop | grep -iE 'qemu|goldfish|debuggable|tags|fingerprint|model|hardware|ndk_translation|isa' | head -40" \
   | tee work/props-after.txt || true
 
-# ---- device-node hiding (early chmod: app opens fail, system unaffected) ---
+# ---- 2. framework restart: AMS re-reads ro.debuggable ---------------------
+# (proven safe on these images - the unpack-x86 packages.xml transplant
+# used the same stop/start cycle)
+adb shell stop || true
+for i in $(seq 1 60); do
+  adb shell getprop init.svc.zygote 2>/dev/null | tr -d '\r' | grep -q stopped && break
+  sleep 1
+done
+adb shell start || true
+sleep 45
+for i in $(seq 1 60); do
+  adb shell pm path com.android.shell >/dev/null 2>&1 && break
+  sleep 2
+done
+sleep 10
+echo "framework restarted: ro.debuggable=$(adb shell getprop ro.debuggable 2>/dev/null | tr -d '\r')"
+echo "adb still root: $(adb shell id 2>/dev/null | tr -d '\r' | head -1)"
+
+# ---- 3. device-node hiding (early chmod: app opens fail, system safe) -----
 adb shell "for d in /dev/qemu_pipe /dev/goldfish_pipe /dev/goldfish_address_space /dev/goldfish_sync /dev/socket/qemud; do chmod 000 \$d 2>/dev/null && echo chmod-000 \$d; done" || true
 adb shell "ls -la /dev/qemu_pipe /dev/goldfish_pipe /dev/goldfish_address_space /dev/goldfish_sync /dev/socket/qemud 2>/dev/null" | tee work/qemu-devices.txt || true
 
@@ -133,7 +155,7 @@ python3 unpack/external_memdump.py \
 adb shell "dmesg 2>/dev/null | grep -iE 'dlopen|libexec|stdc|linker' | head -60" \
   > work/dmesg-linker.txt || true
 adb logcat -d -b main,system,crash > work/logcat-nodebug.txt 2>/dev/null || true
-echo "== key logcat lines =="
+echo "== key logcat lines (jdwp presence is the debuggable indicator) =="
 grep -nE "jdwp|s\.h\.e\.l\.l|ijiami|UnsatisfiedLink|FATAL|AndroidRuntime" \
   work/logcat-nodebug.txt | head -40 || true
 adb shell "ps -A | grep -i youcine" | tee work/ps-after.txt || true

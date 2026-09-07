@@ -91,7 +91,7 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: "SDK + AVD (ramdisk surgery: non-debuggable boot)"
+      - name: SDK + AVD
         env:
           API: ${{ github.event.inputs.api_level || '30' }}
         run: |
@@ -99,29 +99,9 @@ jobs:
           sdkmanager "platform-tools" "emulator" \
             "system-images;android-${API};google_apis;x86_64" \
             "platforms;android-${API}" > /dev/null
-          # --- ramdisk surgery -------------------------------------------------
-          # /default.prop (ramdisk) sets ro.secure=1 ro.debuggable=1 and both
-          # are first-set-wins: build.prop edits and -prop are ignored (run
-          # 34081223822: emulator rejects non-qemu -prop; sed needs a working
-          # remount which fails). Patching the ramdisk before the first boot
-          # is the only clean fix: ro.debuggable=0 -> apps run non-debuggable
-          # (no JDWP transport), ro.secure=0 -> adbd runs as root from boot
-          # so the out-of-process /proc/<pid>/mem sweep still works.
-          SRC="$ANDROID_HOME/system-images/android-${API}/google_apis/x86_64"
-          mkdir -p work/image
-          cp -a "$SRC"/. work/image/
-          ls -la work/image | head -12
-          python3 unpack/patch_ramdisk.py --image work/image/ramdisk.img \
-            --set 'ro.debuggable=1:0' --set 'ro.secure=1:0' || \
-            { echo "::error::ramdisk patch failed"; exit 1; }
           echo "no" | avdmanager create avd -n youcine \
             -k "system-images;android-${API};google_apis;x86_64" \
             -d pixel_4 --force
-          AVD_INI="$HOME/.android/avd/youcine.avd/config.ini"
-          sed -i "s|^image.sysdir.1=.*|image.sysdir.1=$(pwd)/work/image/|" "$AVD_INI" || true
-          grep -q '^image.sysdir.1=' "$AVD_INI" || \
-            echo "image.sysdir.1=$(pwd)/work/image/" >> "$AVD_INI"
-          grep -E "image.sysdir" "$AVD_INI"
 
       - name: Fetch packed APK
         env:
@@ -138,7 +118,7 @@ jobs:
           fi
           sha256sum work/packed.apk | tee work/apk.sha256
 
-      - name: Boot emulator (non-debuggable ramdisk) and dump
+      - name: Boot emulator and dump (spoofed environment, framework restart)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ github.event.inputs.api_level || '30' }}
@@ -146,8 +126,9 @@ jobs:
           avd-name: youcine
           target: google_apis
           # NOTE: the emulator only accepts qemu.* via -prop (run evidence
-          # 34081223822); the non-debuggable boot comes from the patched
-          # ramdisk, the qemu-signal spoofing from unpack/patch_props.py.
+          # 34081223822); every non-qemu signal is spoofed at runtime by
+          # unpack/patch_props.py, and the non-debuggable app processes come
+          # from the framework restart after patching ro.debuggable=0.
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: bash unpack/nodebug_flow.sh || true
