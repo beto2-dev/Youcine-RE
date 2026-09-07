@@ -89,22 +89,37 @@ portal hosts.
 ## Status (2026-09-07)
 
 Every tool in the pipeline is finished and validated piece by piece
-across ~20 instrumented CI runs; see
+across ~25 instrumented CI runs; see
 [docs/en/03-protections-and-bypass.md](docs/en/03-protections-and-bypass.md)
 for the complete layer-by-layer map (ABI/translation trap, SecLLVM,
 content-integrity gate, the raw-syscall/int3/ud2/SIGSEGV death ladder and
 its neutralization in `unpack/trace_guard.c`).
 
-Two things remain, both pure execution:
+The empirical conclusion of the hosted-CI research: **ARM guests are
+impossible on GitHub-hosted runners** (Linux launcher refuses arm64 AVDs
+on x86 hosts; macOS runners force HVF and lack the entitlement - even
+with `-accel off`). The dump therefore finishes on real hardware, one
+command away:
 
-* **GitHub Actions minutes** on this account were exhausted during the
-  research session (macOS jobs bill at 10x). After the monthly reset -
-  or a spending-limit top-up - dispatch **Dynamic unpack (emulator)**
-  once and then **Boot test (unpacked APK)** once; both complete
-  automatically.
-* The final dump run costs roughly 25-45 min of macOS runner time
-  (10x multiplier). A self-hosted macOS runner (labels `macos-14,arm64`)
-  runs the same workflows for free.
+* **A rooted Android phone** (recommended, the classic path):
+
+  ```bash
+  adb install -r -g ycMob_1.17.6_ycsite.apk
+  adb shell am start -n com.world.youcinemobile/com.mobile.brasiltv.activity.SplashAty
+  python3 unpack/external_memdump.py --app com.world.youcinemobile \
+      --out-dir dumped/youcine --expect 4 --timeout 600 --settle 3
+  python3 unpack/validate_and_extract_dex.py --dump-dir dumped/youcine \
+      --out-dir dexs --min-size 65536
+  python3 unpack/rebuild_unpacked_apk.py --apk ycMob_1.17.6_ycsite.apk \
+      --dump-dir dexs --out youcine-1.17.6-unpacked.apk \
+      --keystore re.keystore --storepass android
+  ```
+
+* **Your own Mac as a self-hosted runner** (labels `[self-hosted, macOS]`):
+  dispatch **Dynamic unpack (emulator)** with the `run_selfhosted` input
+  enabled; `rebuild` and **Boot test** then run automatically end-to-end.
+
+Full details: [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
 4. GitHub Action **Boot test** installs the unpacked APK on an **arm64**
    emulator (ijkplayer / Ranger JNI have no x86_64 builds) and stores logcat
    plus a screenshot.

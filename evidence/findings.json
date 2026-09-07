@@ -295,8 +295,8 @@
     "x86_64_emulator + original apk": "arm64 process under ndk_translation -> SecLLVM fails -> N.al never registered",
     "x86_64_emulator + dump-build + trace_guard": "loader native; content gate blocks decryption (documented dead end)",
     "linux runner + arm64 AVD": "BLOCKED by emulator launcher: FATAL Avd's CPU Architecture 'arm64' is not supported on x86_64 host",
-    "macos-14 runner default accel": "BLOCKED: no Hypervisor.framework (HVF_UNSUPPORTED)",
-    "macos-14 runner + -accel off (same-arch TCG) + ORIGINAL apk": "FINAL PATH: native ARM, checks pass, decryption proceeds"
+    "macos-14 runner + arm64 AVD (ANY accel setting incl. -accel off)": "BLOCKED: qemu always initializes HVF; runners lack the entitlement (HVF_UNSUPPORTED) - proven in runs 34063246076 and 34068661659",
+    "physical rooted ARM device (or self-hosted Mac with HVF) + ORIGINAL apk": "FINAL PATH: native ARM, checks pass, decryption proceeds - one-command instructions in docs/en/06-dynamic-unpack.md"
   },
   "run_history": {
     "34044920876": "original on x86_64: translated arm64, N.al unregistered",
@@ -312,6 +312,8 @@
     "34057250027": "ud2 skipped; SIGSEGV fault-pin",
     "34057901348": "SIGSEGV relay = fatal; content gate blocks decrypt of modified APK",
     "34058535954": "linux emulator has qemu-system-aarch64 but launcher blocks arm64 AVDs",
-    "account": "Actions included minutes exhausted at ~20:58 (both repos fail instantly with 0 steps); monthly reset pending"
+    "account": "Actions included minutes exhausted at ~20:58 (both repos fail instantly with 0 steps); monthly reset pending",
+    "34063246076": "macOS + -accel off: qemu still forces HVF (HVF_UNSUPPORTED) - arm64 guests impossible on hosted runners",
+    "34068661659": "light android-28 default image: same instant HVF death"
   }
 }

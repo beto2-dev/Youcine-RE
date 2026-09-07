@@ -91,23 +91,39 @@ saliendo de los hosts del portal.
 ## Estado (2026-09-07)
 
 Cada herramienta del pipeline esta terminada y validada pieza por pieza a
-lo largo de ~20 ejecuciones instrumentadas en CI; ver
+lo largo de ~25 ejecuciones instrumentadas en CI; ver
 [docs/es/03-protecciones-y-bypass.md](docs/es/03-protecciones-y-bypass.md)
 para el mapa completo capa por capa (trampa de ABI/traduccion, SecLLVM,
 gate de integridad de contenido, la escalera de muerte
 raw-syscall/int3/ud2/SIGSEGV y su neutralizacion en
 `unpack/trace_guard.c`).
 
-Quedan dos cosas, ambas pura ejecucion:
+La conclusion empirica de la investigacion en CI: **los invitados ARM son
+imposibles en los runners alojados de GitHub** (el launcher de Linux
+rechaza AVDs arm64 en hosts x86; los runners de macOS fuerzan HVF y
+carecen del entitlement - incluso con `-accel off`). El dump se termina
+por tanto en hardware real, a un comando de distancia:
 
-* **Los minutos de GitHub Actions** de la cuenta se agotaron durante la
-  sesion de investigacion (los jobs de macOS facturan 10x). Tras el
-  reinicio mensual - o al subir el limite de gasto - despacha
-  **Dynamic unpack (emulator)** una vez y luego **Boot test (unpacked
-  APK)** una vez; ambos completan automaticamente.
-* La ejecucion final del dump cuesta unos 25-45 min de runner macOS
-  (multiplicador 10x). Un runner macOS auto-alojado (labels
-  `macos-14,arm64`) ejecuta los mismos workflows gratis.dor **arm64** (ijkplayer
+* **Un telefono Android rooteado** (recomendado, la via clasica):
+
+  ```bash
+  adb install -r -g ycMob_1.17.6_ycsite.apk
+  adb shell am start -n com.world.youcinemobile/com.mobile.brasiltv.activity.SplashAty
+  python3 unpack/external_memdump.py --app com.world.youcinemobile \
+      --out-dir dumped/youcine --expect 4 --timeout 600 --settle 3
+  python3 unpack/validate_and_extract_dex.py --dump-dir dumped/youcine \
+      --out-dir dexs --min-size 65536
+  python3 unpack/rebuild_unpacked_apk.py --apk ycMob_1.17.6_ycsite.apk \
+      --dump-dir dexs --out youcine-1.17.6-unpacked.apk \
+      --keystore re.keystore --storepass android
+  ```
+
+* **Tu propio Mac como runner auto-alojado** (labels
+  `[self-hosted, macOS]`): despacha **Dynamic unpack (emulator)** con el
+  input `run_selfhosted` activado; `rebuild` y **Boot test** corren
+  entonces automaticamente de principio a fin.
+
+Detalles completos: [docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).dor **arm64** (ijkplayer
    y Ranger JNI no traen x86_64) + logcat y captura.
 
 Los scripts Frida en `frida-scripts/` son la via in-process. `libexec` usa
