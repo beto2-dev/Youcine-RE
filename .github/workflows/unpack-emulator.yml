@@ -743,7 +743,7 @@ jobs:
             gh release upload unpacked-1.17.6 \
               work/youcine-1.17.6-unpacked.apk work/unpacked.sha256 --clobber || true
             # chain the boot test against the fresh release
-            gh workflow run boot-test.yml -R "$GITHUB_REPOSITORY" --ref main || true
+            gh workflow run boot-test.yml -R "$GITHUB_REPOSITORY" --ref main -f apk_source=release -f tag=unpacked-1.17.6 -f apk_asset=youcine-1.17.6-unpacked.apk || true
           else
             echo "::warning::no valid DEX dumps; nothing to rebuild"
             exit 3
