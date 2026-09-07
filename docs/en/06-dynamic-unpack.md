@@ -305,3 +305,111 @@ youcinemobile window (run 34166250339 initially produced a
 FALSE-POSITIVE "BOOT OK": the crash handler itself died on a stub
 VerifyError, leaving a zombie process with a black window - see the
 workflow comments).
+
+---
+
+## Phase 2 tooling - IMPLEMENTED (2026-09-08)
+
+Everything Phase 2 needs is now in the repo. Dispatch the
+**Phase 2 - Frida RegisterNatives + warmup + re-dump (redroid)**
+workflow (`.github/workflows/frida-redump.yml`) or run the flow
+locally on any arm64 Linux box with Docker:
+
+```bash
+GH_TOKEN=<pat> bash unpack/redroid_frida_flow.sh
+```
+
+### What runs
+
+`unpack/redroid_frida_flow.sh` boots the SAME proven redroid
+container as `redroid_flow.sh` (build.prop patched before first
+boot, adbd root, ORIGINAL byte-identical apk installed) but instead
+of dumping it hands the process to Frida:
+
+1. **frida-server 16.6.6 (arm64)** is pushed under a RANDOMIZED
+   process name (`mon.<hex>`) listening on 127.0.0.1:47890 - iJiami
+   fingerprints both the default binary name and port 27042 - and
+   exposed to the host via `adb forward tcp:4789`.
+2. `unpack/frida_phase2_driver.py` spawns the app GATED (never
+   `am start` - the native loader must run instrumented from the
+   first instruction), loads the guard script
+   (`02_bypass_ptrace.js`) plus the three Phase-2 scripts, then:
+   * `frida-scripts/06_register_natives_table.js` hooks
+     `art::JNI<false/true>::RegisterNatives` in libart.so (symbol
+     match; JNIEnv-table slot-215 fallback) and records every
+     registration: class, method name, JNI signature, fnPtr resolved
+     to module+offset. The dedup keeps the LATEST fnPtr per
+     (class, name, signature) - libexec re-registers as classes
+     re-materialize. Output: `work/phase2/jni_table.json` (+ raw
+     event log `jni_table_events.jsonl`).
+   * Quiet-window detection: when no new registrations arrive for
+     `REG_QUIET` (12 s), the boot-time registration wave is done.
+   * `frida-scripts/08_redump_dex.js` dumps the in-memory images of
+     libexec.so and libijmDataEncryption.so (pre-warm-up tag) - the
+     SecLLVM self-modified memory image, not the disk file - plus a
+     live census of the `[anon:dalvik-DEX data]` spans (readable
+     bytes, holes, dex magic + file_size per span).
+   * The driver parses the class list straight from the 5 dumped
+     DEXes of the `dumps-1.17.6` release (minimal DEX parser:
+     string_ids/type_ids/class_defs) and feeds
+     `frida-scripts/07_class_warmup.js` in batches of 200:
+     `Class.forName(name, true, loader)` over a classloader cascade.
+     Every class is isolated in try/catch - one verifier-rejected
+     stub can never abort the sweep. This is the warm-up that makes
+     libexec re-materialize the ~45,238 extracted stub bodies and
+     fire the remaining registrations.
+   * Post-warm-up: a second quiet window, module dumps re-taken
+     (tag `post`), then the AUTHORITATIVE out-of-process re-dump via
+     the proven `unpack/dexdata_extract.py` (SIGSTOP + pread64
+     FOLL_FORCE over the -wxp pieces) + checksum repair with
+     `unpack/validate_and_extract_dex.py`.
+3. Everything lands in `work/phase2/` (jni_table.json,
+   warmup_stats.json, redump/ + repaired/ dexes, inproc/ module
+   images, summary.json) and is published to the immutable
+   `phase2-1.17.6` release + the `dumps-phase2` artifact.
+
+The workflow verdict mirrors the boot-test honesty: 0 captured
+registrations fails the job (`::error::`), a table with 0 re-dumped
+dexes warns, and `rn_methods >= 1 && redump_dex_count >= 1` is
+`PHASE 2 OK`.
+
+### What the re-dump is compared against
+
+`summary.json` reports the class-level delta: how many classes the
+warm-up loaded ok / notfound / fail (verifier), and how many DEX
+containers the re-dump recovered versus the phase-1 five. A
+successful Phase 2 re-dump shows (a) more complete class bodies
+(the 45k stubs now carry real code), and (b) a jni_table covering
+the ~805 ACC_NATIVE methods with their libexec offsets - the input
+for the future de-natify bridge (Java bodies for the open-source
+families, a registrar shim for the vendor's 424).
+
+### ijiami-static - the offline (fully static) attack on ijiami.dat
+
+`ijiami-static/` (new top-level folder) pursues the same payload via
+pure static decryption, now that the runtime dump gate is satisfied:
+
+* `capture_aes_key.js` - Frida hook on every AES key-material entry
+  point (openssl `AES_set_*_key`, `EVP_*Init*`, mbedtls, rijndael,
+  tiny-AES) in every module as it loads, plus a memory scan for the
+  AES S-box / inverse S-box inside libexec.so (the SecLLVM custom
+  AES leaves table fingerprints; Ghidra xrefs to those addresses
+  expose the key-setup function).
+* `hunt_key_schedule.py` - offline scan of memory-dump region files
+  for AES key schedules: forward expansion match, or
+  consistency-only recurrence with INVERSE key-schedule recovery of
+  the original key. `--selftest` passes 14/14 (FIPS-197 vectors).
+* `decrypt_ijiami_dat.py` - the candidate matrix (header-derived +
+  captured + hunted keys x ECB/CBC x IV variants) against the
+  9,543,463-byte payload, verified by DEX/zip/gzip/zlib magic,
+  `Lcom/` descriptor density and NRV2B re-verification (reuses
+  `static-analysis/nrv2b_ijiami.py`). `--selftest` passes 15/15.
+* `analyze_dat.py` - re-derives the evidence header digest + ECB
+  duplicate-block / entropy statistics (measured on the real file:
+  0.222% duplicate 16-byte blocks, entropy 7.76-7.99, printable
+  36.2%, a 15-byte non-PKCS#7 trailer).
+
+If the AES key is captured during a Phase-2 run (or hunted in the
+dumps artifacts), `decrypt_ijiami_dat.py` yields the four payloads
+fully offline - an independent cross-validation of the runtime dump
+and the only path that does not need the packer engine at all.

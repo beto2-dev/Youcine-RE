@@ -87,6 +87,17 @@ saliendo de los hosts del portal.
 4. Action **Boot test**: APK desempaquetado en emulador arm64 verificando
    que la UI real `com.mobile.brasiltv.*` arranca (screenshots + logcat +
    dumpsys).
+5. Action **Fase 2 (Frida RegisterNatives + warm-up + re-dump,
+   redroid)**: corre la APK ORIGINAL empacada bajo Frida en el mismo
+   contenedor redroid - captura la tabla JNI completa
+   (`frida-scripts/06_register_natives_table.js`), fuerza la carga de
+   todas las clases de los DEX dumpeados (`07_class_warmup.js`) para
+   que libexec re-materialice los ~45k stubs extraidos, re-dumpea los
+   contenedores DEX y la imagen en memoria de libexec
+   (`08_redump_dex.js` + `unpack/dexdata_extract.py`) y publica todo al
+   release `phase2-1.17.6`. La carpeta `ijiami-static/` ataca el mismo
+   payload totalmente offline: captura/caza de clave AES + descifrado
+   estatico de `assets/ijiami.dat`.
 
 ## Estado (2026-09-08)
 
@@ -136,11 +147,34 @@ por tanto en hardware real, a un comando de distancia:
   input `run_selfhosted` activado; `rebuild` y **Boot test** corren
   entonces automaticamente de principio a fin.
 
-Detalles completos: [docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).dor **arm64** (ijkplayer
-   y Ranger JNI no traen x86_64) + logcat y captura.
+Detalles completos: [docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
 
 Los scripts Frida en `frida-scripts/` son la via in-process. `libexec` usa
 `ptrace`; si el agente muere, el memdump sigue siendo valido.
+
+## Fase 2 (implementada 2026-09-08)
+
+La capa de captura Frida para la ultima linea de defensa esta lista:
+
+* `unpack/frida_phase2_driver.py` + `unpack/redroid_frida_flow.sh` +
+  `.github/workflows/frida-redump.yml` - corrida Frida spawn-gateada de
+  la APK ORIGINAL en redroid arm64 nativo (frida-server renombrado en
+  puerto no estandar), captura de la tabla RegisterNatives, barrido de
+  warm-up de clases desde los DEX de `dumps-1.17.6`, re-dump
+  post-warm-up con reparacion de checksums e imagenes en memoria del
+  libexec.so / libijmDataEncryption.so auto-modificado por SecLLVM.
+  Salida: release `phase2-1.17.6` (jni_table.json + dexes re-dumpeados
+  + imagenes de modulos).
+* `ijiami-static/` - el ataque AES offline contra `ijiami.dat`:
+  captura de clave en runtime, caza de key schedules en dumps de
+  memoria (con recuperacion por key schedule inverso) y un
+  descifrador de matriz de candidatos verificado contra salida
+  DEX/NRV2B. Self-tests en verde (14/14, 15/15).
+
+Ejecutalo: despacha **Phase 2 - Frida RegisterNatives + warmup +
+re-dump (redroid)**, o localmente `GH_TOKEN=<pat> bash
+unpack/redroid_frida_flow.sh`. Metodologia completa en
+[docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
 
 ## Documentacion
 

@@ -1,0 +1,246 @@
+name: "Phase 2 - Frida RegisterNatives + warmup + re-dump (redroid)"
+
+# Youcine-RE - PHASE 2 of the unpack: frida instrumentation of the ORIGINAL
+# packed APK inside the PROVEN native-arm64 redroid environment.
+#
+# WHAT THIS ADDS OVER unpack-emulator.yml (unpack-redroid job):
+#   redroid_flow.sh already recovers the 5 static DEXes (run 34133100459),
+#   but the rebuilt APK dies at the first VMP method (SqlHelper.getDb):
+#   the ~45k extraction-stub bodies only materialize when a class is
+#   loaded, and the 805-method RegisterNatives table is never captured.
+#   This workflow runs unpack/redroid_frida_flow.sh, which brings up the
+#   same redroid + build.prop environment, then frida-server (RANDOMIZED
+#   binary name, non-standard port - iJiami fingerprints both 'frida-server'
+#   and port 27042) and invokes the phase-2 driver
+#   (unpack/frida_phase2_driver.py, agent 2-a):
+#     spawn-gate -> hook RegisterNatives -> warm-up every class -> re-dump.
+#
+# WHY runs-on: ubuntu-24.04-arm (DO NOT switch to ubuntu-latest):
+#   GitHub's FREE native arm64 runner (public repo = unlimited minutes) -
+#   the environment proven by run 34133100459.  The packer's SecLLVM
+#   self-modifying native code cannot survive binary translation: on the
+#   x86_64 emulator the sandboxed process died with SIGSEGV, rip inside
+#   the ndk_translation region (run 34084986538).  The arm64-v8a
+#   libexec.so must execute on a REAL aarch64 host.
+#
+# WHY no `am start` anywhere: the driver spawns the app itself via frida
+# spawn-gating so the RegisterNatives hook is installed BEFORE any
+# packer/app code runs; launching the app first would let the iJiami
+# native loader run uninstrumented (and its death ladder may kill the
+# process before the hooks land).
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_source:
+        description: 'packed APK source: release (packed-1.17.6) or url (SAMPLE_URL secret)'
+        required: false
+        default: 'release'
+      frida_version:
+        description: 'frida version - server binary AND python package must match'
+        required: false
+        default: '16.6.6'
+
+permissions:
+  # contents: write - the flow reads the immutable releases (packed-1.17.6,
+  # dumps-1.17.6) and this workflow (re)publishes the phase2-1.17.6 release.
+  contents: write
+
+concurrency:
+  group: frida-redump
+  cancel-in-progress: false
+
+jobs:
+  frida-redump:
+    # FREE native arm64 - the PROVEN unpack environment (run 34133100459);
+    # SecLLVM cannot survive ndk_translation (run 34084986538).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    outputs:
+      rn_methods: ${{ steps.phase2_out.outputs.rn_methods }}
+      redump_dex_count: ${{ steps.phase2_out.outputs.redump_dex_count }}
+    env:
+      APP_ID: com.world.youcinemobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # NOTE: no setup-android here - Google's platform-tools zip is
+      # x86_64-only; Ubuntu's adb is built natively for arm64 (same as the
+      # unpack-redroid job).  xz-utils decompresses the frida-server
+      # release artifact; zip packs the re-dumped dexes for the release.
+      - name: Host deps (adb, xz-utils, zip, docker check)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y adb xz-utils zip
+          adb version
+          docker version
+          xz --version | head -1
+
+      # GH_TOKEN: the release downloads (packed-1.17.6 / dumps-1.17.6) need
+      # it when the repo or releases are private; in Actions GITHUB_TOKEN
+      # is injected automatically - locally export your own PAT instead.
+      # `|| true`: the flow ALWAYS collects its evidence; the Verdict step
+      # below turns 0 RegisterNatives into a job failure (the flow's own
+      # exit path stays green so evidence upload always happens).
+      - name: Run redroid frida flow (phase 2)
+        env:
+          FRIDA_VERSION: ${{ github.event.inputs.frida_version || '16.6.6' }}
+          APK_SOURCE: ${{ github.event.inputs.apk_source || 'release' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash unpack/redroid_frida_flow.sh || true
+
+      # Parse the driver's work/phase2/summary.json into job outputs.
+      # The summary schema is owned by agent 2-a, so the parser tries the
+      # plausible key spellings and falls back to counting the files the
+      # driver left on disk (work/phase2/repaired/*) - never hard-fails.
+      - name: Phase 2 outputs
+        id: phase2_out
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          def as_int(v):
+              if isinstance(v, bool):
+                  return None
+              if isinstance(v, int):
+                  return v
+              if isinstance(v, (list, tuple)):
+                  return len(v)
+              try:
+                  return int(str(v).strip())
+              except (TypeError, ValueError):
+                  return None
+
+          rn = 0
+          redump = 0
+          summary = "work/phase2/summary.json"
+          if os.path.isfile(summary):
+              try:
+                  with open(summary) as f:
+                      d = json.load(f)
+                  print("::group::work/phase2/summary.json")
+                  print(json.dumps(d, indent=2, sort_keys=True))
+                  print("::endgroup::")
+                  for key in ("rn_methods", "rn_count", "register_natives",
+                              "register_natives_count", "jni_methods",
+                              "rn_total", "methods"):
+                      if key in d:
+                          v = as_int(d[key])
+                          if v is not None:
+                              rn = v
+                              break
+                  for key in ("redump_dex_count", "repaired_dex_count",
+                              "redump_count", "dex_count"):
+                      if key in d:
+                          v = as_int(d[key])
+                          if v is not None:
+                              redump = v
+                              break
+              except (OSError, ValueError) as exc:
+                  print("::warning::summary.json unreadable: %s" % exc)
+          else:
+              print("::warning::work/phase2/summary.json missing - the driver did not complete (rn/redump outputs set to 0)")
+
+          # filesystem fallback: the repaired re-dump files are ground truth
+          if redump == 0:
+              redump = len([p for p in glob.glob("work/phase2/repaired/*")
+                            if os.path.isfile(p)])
+
+          print("rn_methods=%d" % rn)
+          print("redump_dex_count=%d" % redump)
+          out = os.environ.get("GITHUB_OUTPUT")
+          if out:
+              with open(out, "a") as f:
+                  f.write("rn_methods=%d\n" % rn)
+                  f.write("redump_dex_count=%d\n" % redump)
+          PY
+
+      - name: Verdict
+        if: always()
+        run: |
+          RN="${{ steps.phase2_out.outputs.rn_methods }}"
+          RD="${{ steps.phase2_out.outputs.redump_dex_count }}"
+          RN="${RN:-0}"
+          RD="${RD:-0}"
+          echo "rn_methods=$RN redump_dex_count=$RD"
+          if [ "$RN" -lt 1 ]; then
+            echo '::error::0 RegisterNatives captured (frida-server/anti-frida issue - see logs)'
+            exit 1
+          fi
+          if [ "$RD" -lt 1 ]; then
+            echo '::warning::RegisterNatives table captured but re-dump produced 0 dex (see dumps-phase2 artifact)'
+          else
+            echo "PHASE 2 OK - $RN RegisterNatives methods, $RD re-dumped dex(es)"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-phase2
+          # NOTE: work/redroid-data is deliberately EXCLUDED (root-owned
+          # Android data partition, huge and not needed as evidence - same
+          # convention as the unpack-redroid job).  Paths the flow only
+          # creates on some branches are covered by if-no-files-found: warn.
+          path: |
+            work/phase2/**
+            work/logcat-boot-phase2.txt
+            work/logcat-phase2.txt
+            work/docker-phase2.txt
+            work/ps-phase2.txt
+            work/maps-app-phase2.txt
+            work/props-phase2.txt
+            work/props-phase2-after.txt
+            work/dumpsys-window-phase2.txt
+            work/sv.log
+            work/adb-forwards.txt
+            work/device-phase2-dir.txt
+            work/pm-path-phase2.txt
+            work/abi-info-phase2.txt
+            work/apk-phase2.sha256
+            work/pip-frida.log
+            work/phase2-driver.exit
+            work/system-build.prop
+            work/vendor-build.prop
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Publish the phase-2 evidence to the phase2-1.17.6 release.  `if:
+      # always()` with an internal existence test so a failed run can still
+      # publish whatever evidence exists; every gh command is `|| true` -
+      # publishing is best-effort and never fails the job (the Verdict step
+      # already decided the run's fate).
+      - name: Publish phase-2 release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f work/phase2/summary.json ]; then
+            echo '::warning::work/phase2/summary.json missing - nothing to publish'
+            exit 0
+          fi
+          gh release create phase2-1.17.6 -R "$GITHUB_REPOSITORY" \
+            --title 'Phase 2 frida capture 1.17.6' \
+            --notes 'Frida RegisterNatives table + class warm-up + re-dump of the ORIGINAL packed APK in native-arm64 redroid (ubuntu-24.04-arm). See docs/en/06-dynamic-unpack.md, section "Phase 2".' \
+            --target "$GITHUB_SHA" || true
+          for asset in work/phase2/jni_table.json work/phase2/warmup_stats.json work/phase2/summary.json; do
+            if [ -f "$asset" ]; then
+              gh release upload phase2-1.17.6 -R "$GITHUB_REPOSITORY" "$asset" --clobber || true
+            else
+              echo "::warning::$asset not produced by the driver"
+            fi
+          done
+          if ls work/phase2/repaired/* >/dev/null 2>&1; then
+            zip -j redump-dexes-phase2.zip work/phase2/repaired/* || true
+            sha256sum redump-dexes-phase2.zip || true
+            gh release upload phase2-1.17.6 -R "$GITHUB_REPOSITORY" \
+              redump-dexes-phase2.zip --clobber || true
+          else
+            echo '::warning::work/phase2/repaired/ is empty - no redump-dexes-phase2.zip asset'
+          fi

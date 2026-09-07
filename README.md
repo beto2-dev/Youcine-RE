@@ -85,6 +85,17 @@ portal hosts.
 4. GitHub Action **Boot test (unpacked APK)** installs the rebuilt
    packer-free build on an arm64 emulator and verifies the real
    `com.mobile.brasiltv.*` UI boots (screenshots + logcat + dumpsys).
+5. GitHub Action **Phase 2 (Frida RegisterNatives + warm-up +
+   re-dump, redroid)** runs the ORIGINAL packed apk under Frida in the
+   same redroid container: captures the complete JNI registration
+   table (`frida-scripts/06_register_natives_table.js`), force-loads
+   every class from the dumped DEXes (`07_class_warmup.js`) so libexec
+   re-materializes the ~45k extracted stub bodies, re-dumps the DEX
+   containers and libexec's in-memory image (`08_redump_dex.js` +
+   `unpack/dexdata_extract.py`), and publishes everything to the
+   `phase2-1.17.6` release. The `ijiami-static/` folder attacks the
+   same payload fully offline: AES key capture/hunt + static
+   decryption of `assets/ijiami.dat`.
 
 ## Status (2026-09-08)
 
@@ -140,6 +151,28 @@ build deterministically from the immutable `packed-1.17.6` +
 
 Frida scripts under `frida-scripts/` remain as an in-process alternative.
 `libexec` calls `ptrace`; if the agent is killed, the memdump path still works.
+
+## Phase 2 (implemented 2026-09-08)
+
+The Frida capture layer for the last defense line is in place:
+
+* `unpack/frida_phase2_driver.py` + `unpack/redroid_frida_flow.sh` +
+  `.github/workflows/frida-redump.yml` - spawn-gated Frida run of the
+  ORIGINAL apk in native-arm64 redroid (renamed frida-server on a
+  non-standard port), RegisterNatives table capture, class warm-up
+  sweep from the `dumps-1.17.6` DEXes, post-warm-up re-dump with
+  checksum repair, and memory images of the SecLLVM-self-modified
+  libexec.so / libijmDataEncryption.so. Output: `phase2-1.17.6`
+  release (jni_table.json + re-dumped dexes + module images).
+* `ijiami-static/` - the offline AES attack on `ijiami.dat`:
+  runtime key capture, key-schedule hunt in memory dumps (with
+  inverse key-schedule recovery), and a candidate-matrix decryptor
+  verified against DEX/NRV2B output. Self-tests pass (14/14, 15/15).
+
+Run it: dispatch **Phase 2 - Frida RegisterNatives + warmup +
+re-dump (redroid)**, or locally `GH_TOKEN=<pat> bash
+unpack/redroid_frida_flow.sh`. Full methodology in
+[docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
 
 ## Documentation
 

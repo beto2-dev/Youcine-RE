@@ -315,3 +315,118 @@ con foco (el run 34166250339 produjo inicialmente un "BOOT OK"
 FALSO-POSITIVO: el crash handler de la propia app murió en un
 VerifyError de un stub y dejó un proceso zombi con ventana negra -
 ver los comentarios del workflow).
+
+---
+
+## Herramientas de la Fase 2 - IMPLEMENTADAS (2026-09-08)
+
+Todo lo que la Fase 2 necesita ya está en el repo. Despacha el
+workflow **Phase 2 - Frida RegisterNatives + warmup + re-dump
+(redroid)** (`.github/workflows/frida-redump.yml`) o ejecuta el flujo
+localmente en cualquier Linux arm64 con Docker:
+
+```bash
+GH_TOKEN=<pat> bash unpack/redroid_frida_flow.sh
+```
+
+### Qué ejecuta
+
+`unpack/redroid_frida_flow.sh` levanta el MISMO contenedor redroid
+probado que `redroid_flow.sh` (build.prop parcheado antes del primer
+boot, adbd root, apk ORIGINAL byte-idéntica instalada) pero en vez de
+dumpear le entrega el proceso a Frida:
+
+1. **frida-server 16.6.6 (arm64)** se sube con un nombre de proceso
+   ALEATORIZADO (`mon.<hex>`) escuchando en 127.0.0.1:47890 - iJiami
+   fingerprinta tanto el nombre binario por defecto como el puerto
+   27042 - y se expone al host vía `adb forward tcp:4789`.
+2. `unpack/frida_phase2_driver.py` hace spawn de la app GATEADA
+   (nunca `am start` - el cargador nativo debe correr instrumentado
+   desde la primera instrucción), carga el script guardián
+   (`02_bypass_ptrace.js`) más los tres scripts de Fase 2, y luego:
+   * `frida-scripts/06_register_natives_table.js` hookea
+     `art::JNI<false/true>::RegisterNatives` en libart.so (match por
+     símbolo; fallback al slot 215 de la tabla JNIEnv) y registra
+     cada registro: clase, nombre del método, firma JNI, fnPtr
+     resuelto a módulo+offset. El dedup conserva el ÚLTIMO fnPtr por
+     (clase, nombre, firma) - libexec re-registra cuando las clases
+     se re-materializan. Salida: `work/phase2/jni_table.json` (+ log
+     crudo de eventos `jni_table_events.jsonl`).
+   * Detección de ventana silenciosa: cuando no llegan registros
+     nuevos durante `REG_QUIET` (12 s), la ola de registros del boot
+     terminó.
+   * `frida-scripts/08_redump_dex.js` dumpea las imágenes en memoria
+     de libexec.so y libijmDataEncryption.so (tag pre-warm-up) - la
+     imagen auto-modificada por SecLLVM, no el archivo en disco - más
+     un censo en vivo de los spans `[anon:dalvik-DEX data]` (bytes
+     legibles, huecos, magic dex + file_size por span).
+   * El driver parsea la lista de clases directamente de los 5 DEX
+     dumpeados del release `dumps-1.17.6` (parser DEX mínimo:
+     string_ids/type_ids/class_defs) y alimenta a
+     `frida-scripts/07_class_warmup.js` en lotes de 200:
+     `Class.forName(name, true, loader)` sobre una cascada de
+     classloaders. Cada clase va aislada en try/catch - un solo stub
+     rechazado por el verifier nunca aborta el barrido. Este es el
+     warm-up que hace que libexec re-materialice los ~45.238 cuerpos
+     de stub extraídos y dispare los registros restantes.
+   * Post-warm-up: una segunda ventana silenciosa, re-toma de los
+     dumps de módulos (tag `post`), y luego el re-dump
+     FUERA-DE-PROCESO autoritativo vía el probado
+     `unpack/dexdata_extract.py` (SIGSTOP + pread64 FOLL_FORCE sobre
+     las piezas -wxp) + reparación de checksums con
+     `unpack/validate_and_extract_dex.py`.
+3. Todo cae en `work/phase2/` (jni_table.json, warmup_stats.json,
+   redump/ + repaired/ dexes, inproc/ imágenes de módulos,
+   summary.json) y se publica al release inmutable `phase2-1.17.6` +
+   el artefacto `dumps-phase2`.
+
+El veredicto del workflow espeja la honestidad del boot-test: 0
+registros capturados falla el job (`::error::`), una tabla con 0 dexes
+re-dumpeados advierte, y `rn_methods >= 1 && redump_dex_count >= 1`
+es `PHASE 2 OK`.
+
+### Contra qué se compara el re-dump
+
+`summary.json` reporta el delta a nivel de clases: cuántas clases el
+warm-up cargó ok / notfound / fail (verifier), y cuántos contenedores
+DEX recuperó el re-dump frente a los cinco de la fase 1. Una Fase 2
+exitosa muestra (a) cuerpos de clase más completos (los 45k stubs ya
+con código real), y (b) una jni_table cubriendo los ~805 métodos
+ACC_NATIVE con sus offsets en libexec - el insumo para el futuro
+puente de de-natificación (cuerpos Java para las familias open
+source, shim registrador para los 424 propios del vendor).
+
+### ijiami-static - el ataque offline (totalmente estático) a ijiami.dat
+
+`ijiami-static/` (nueva carpeta de primer nivel) persigue el mismo
+payload vía descifrado puramente estático, ahora que el gate del dump
+en runtime está satisfecho:
+
+* `capture_aes_key.js` - hook Frida sobre cada punto de entrada de
+  material de clave AES (openssl `AES_set_*_key`, `EVP_*Init*`,
+  mbedtls, rijndael, tiny-AES) en cada módulo a medida que carga, más
+  un escaneo de memoria del S-box AES / S-box inverso dentro de
+  libexec.so (el AES custom de SecLLVM deja fingerprints de tablas;
+  los xrefs de Ghidra a esas direcciones exponen la función de
+  key-setup).
+* `hunt_key_schedule.py` - escaneo offline de archivos de regiones de
+  dumps de memoria buscando key schedules de AES: match por expansión
+  hacia adelante, o recurrencia de solo-consistencia con recuperación
+  por key schedule INVERSO de la clave original. `--selftest` pasa
+  14/14 (vectores FIPS-197).
+* `decrypt_ijiami_dat.py` - la matriz de candidatos (claves derivadas
+  del header + capturadas + cazadas x ECB/CBC x variantes de IV)
+  contra el payload de 9.543.463 bytes, verificado por magic
+  DEX/zip/gzip/zlib, densidad de descriptores `Lcom/` y
+  re-verificación NRV2B (reusa `static-analysis/nrv2b_ijiami.py`).
+  `--selftest` pasa 15/15.
+* `analyze_dat.py` - re-deriva el digest de evidencia del header +
+  estadísticas de bloques duplicados ECB / entropía (medido en el
+  archivo real: 0,222% de bloques de 16 bytes duplicados, entropía
+  7,76-7,99, imprimibles 36,2%, un trailer de 15 bytes no-PKCS#7).
+
+Si la clave AES se captura durante un run de Fase 2 (o se caza en los
+artefactos de dumps), `decrypt_ijiami_dat.py` produce los cuatro
+payloads totalmente offline - una validación cruzada e independiente
+del dump en runtime y el único camino que no necesita para nada el
+motor del packer.
