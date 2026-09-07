@@ -135,3 +135,61 @@ After the dump: the `rebuild` job (or the local commands above) produce
 `youcine-1.17.6-unpacked.apk`, and **Boot test (unpacked APK)** verifies
 on an arm64 emulator (self-hosted Mac) that the real
 `com.mobile.brasiltv.*` UI boots with screenshots and logcat evidence.
+
+---
+
+## RESULT: unpacked (2026-09-07, run 34133100459)
+
+The definitive pipeline that worked end-to-end, entirely on GitHub's
+**free arm64 runners** (`ubuntu-24.04-arm`, public repo = unlimited
+minutes):
+
+1. **redroid Android 11 container** (`redroid/redroid:11.0.0-latest`,
+   native arm64 - NO ndk_translation, NO qemu/goldfish surface at all).
+   `build.prop` is patched BEFORE first boot (`docker create` ->
+   `docker cp` -> `docker start`), replace-only: `ro.debuggable=0`,
+   `ro.secure=0` (root adbd), `user`/`release-keys` Samsung SM-G991B
+   identity on the partition-scoped `ro.product.system.*` keys.
+   **Never append foreign keys** - init's property-context loader aborts
+   (run 34121251995).
+2. **adbd root FIRST**, then the runtime verify-and-fix block patches
+   the property area (`patch_props.py`) + framework restart for any
+   stragglers (`ro.boot.hardware=redroid`, aliases).
+3. **Install the ORIGINAL byte-identical APK + launch** - the iJiami
+   stub decrypts and the real app runs (SplashAty -> DMCAAty; the
+   environment gate that blocked every x86_64 emulator run never fires
+   on native redroid).
+4. **SIGSTOP + targeted extraction of ART's `[anon:dalvik-DEX data]`
+   containers** (`unpack/dexdata_extract.py` + `tools/memread.c`, a
+   static `pread64` helper compiled on the runner): each decrypted dex
+   spans SEVERAL map entries - big `r--p` pieces interleaved with small
+   `-wxp` (no read bit!) pieces; `/proc/<pid>/mem` reads use
+   `FOLL_FORCE`, so the whole span reads as one contiguous range. The
+   toybox `dd` sweep silently produced nothing at those addresses -
+   `pread64` is the reliable reader.
+5. **Checksum repair** (`validate_and_extract_dex.py`): the packer
+   decrypts in place, so the runtime pages differ from the original
+   adler32/SHA-1. Repair order is critical: SHA-1 first (covers
+   `[32:end]`), then adler (covers `[12:end]`, including the fresh
+   SHA-1 field).
+6. **Rebuild** (apktool: real Application class restored, packer assets
+   dropped, 5 recovered `classes*.dex` swapped in) -> zipalign ->
+   apksigner -> published to the **`unpacked-1.17.6` Release** ->
+   **Boot test** chained.
+
+Five dexes recovered (11.9 / 11.5 / 10.9 / 6.3 / 0.6 MB); Jadx 1.5.6
+decompiles them (2,596 classes in the first alone). Full evidence chain
+in the `dumps-redroid` artifacts of runs 34133100459+.
+
+What did NOT work (documented so nobody retries blind alleys):
+- x86_64 emulator + any prop spoof: the translated app never launched
+  cleanly (`am start` deadlock) and the qemu-signal hunt was a red
+  herring - run 34084986538 proved qemu signals are not the gate.
+- BlackDex sandbox on redroid: hidden-API unseal fixed
+  (`settings put global hidden_api_policy 1`), but iJiami's NATIVE
+  death ladder still SIGKILLs the sandbox ~36 ms in via raw syscalls
+  (no Java-level hook can intercept).
+- Magic scanning of `/proc/<pid>/mem`: the packer wipes its own buffer
+  after class loading; the classes live on ONLY as ART's
+  `[anon:dalvik-DEX data]` containers (which magic scans can still
+  miss due to the dd high-address quirk - hence pread64).
