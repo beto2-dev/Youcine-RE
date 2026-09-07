@@ -130,9 +130,10 @@ class Adb:
         return last  # unreachable
 
 
-def sh(adb: Adb, script: str, timeout: float | None = None):
+def sh(adb: Adb, script: str, timeout: float | None = None,
+        quiet: bool = False):
     """Run `adb shell <script>` (single sh invocation)."""
-    return adb.run("shell", script, timeout=timeout)
+    return adb.run("shell", script, timeout=timeout, quiet=quiet)
 
 
 # ---------------------------------------------------------------- uiautomator
