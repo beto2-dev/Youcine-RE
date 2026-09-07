@@ -215,12 +215,14 @@ jobs:
 
       # NOTE: no setup-android here - Google's platform-tools zip is
       # x86_64-only. Ubuntu's adb is built natively for arm64.
-      - name: adb + docker (host deps)
+      # gcc: compile tools/memread.c (static pread64 helper) natively.
+      - name: adb + docker + gcc (host deps)
         run: |
           sudo apt-get update
-          sudo apt-get install -y adb
+          sudo apt-get install -y adb gcc
           adb version
           docker version
+          gcc --version | head -1
 
       - name: Fetch packed APK + BlackDex64
         env:

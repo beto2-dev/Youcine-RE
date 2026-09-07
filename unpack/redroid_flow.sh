@@ -433,6 +433,31 @@ P=$(adb -s "$DEV" shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')
 echo "pidof $APP_ID after launch + 15s: '$P'"
 
 # ---------------------------------------------------------------------------
+# 6b. TARGETED DEX-DATA EXTRACTION (the primary vector since R36).
+#     The maps of the directly-launched (fully decrypted) app contain
+#     [anon:dalvik-DEX data] regions of 10.2/7.8/6.1 MB - ART's raw dex
+#     containers. The generic dd sweep never captured them (high-address
+#     dd quirk) and the packer wipes the original buffer, so we read the
+#     named regions EXACTLY with a static pread64 helper compiled natively
+#     on this arm64 runner.
+# ---------------------------------------------------------------------------
+if command -v gcc >/dev/null 2>&1; then
+  gcc -static -O2 -o work/memread tools/memread.c 2>/dev/null \
+    || echo "::warning::memread compile failed - targeted extraction disabled"
+else
+  echo "::warning::no gcc on runner - targeted extraction disabled"
+fi
+if [ -f work/memread ] && [ -n "$P" ]; then
+  echo "== extracting [anon:dalvik-DEX data] containers =="
+  ANDROID_SERIAL="$DEV" python3 unpack/dexdata_extract.py \
+    --app "$APP_ID" \
+    --out-dir dumped/youcine \
+    --memread work/memread \
+    --min-size 65536 || echo "::warning::dexdata extraction incomplete"
+  ls -la dumped/youcine/ | head -24 || true
+fi
+
+# ---------------------------------------------------------------------------
 # 7. memory dump - the critical handoff to external_memdump.py
 #    Device selection VERIFIED against the code: external_memdump.py uses
 #      line 44:  ADB = os.environ.get("ADB", "adb")
