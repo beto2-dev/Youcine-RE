@@ -732,12 +732,8 @@ jobs:
             # which only the removed packer Application extracts). A plain
             # Java no-op makes every injected call harmless (run 34135095450).
             mkdir -p work/stubsrc/s/h/e/l/l work/stubclasses work/stubdex
-            cat > work/stubsrc/s/h/e/l/l/C.java <<'JAVA'
-            package s.h.e.l.l;
-            public class C {
-                public static void i(int i) {}
-            }
-            JAVA
+            printf 'package s.h.e.l.l;\npublic class C {\n    public static void i(int i) {}\n}\n' \
+              > work/stubsrc/s/h/e/l/l/C.java
             javac -source 8 -target 8 -d work/stubclasses \
               work/stubsrc/s/h/e/l/l/C.java
             "$ANDROID_HOME/build-tools/34.0.0/d8" --min-api 21 \
