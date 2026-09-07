@@ -103,15 +103,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--adb", default="adb")
     ap.add_argument("--set", action="append", default=[],
-                    help="'name=oldvalue:newvalue' (old is used to locate "
-                         "and validate the slot; new is written raw)")
+                    help="'name=oldvalue|newvalue' (old locates+validates "
+                         "the slot; new is written raw; '|' separator "
+                         "because values contain ':')")
     ap.add_argument("--verify-only", action="store_true")
     args = ap.parse_args()
 
     adb = [args.adb]
     sets = []
     for s in args.set:
-        m = re.match(r"^([^=]+)=([^:]*):(.*)$", s)
+        m = re.match(r"^([^=]+)=([^|]*)\|(.*)$", s)
         if not m:
             print(f"[!] bad --set spec: {s!r}", flush=True)
             return 2
