@@ -200,43 +200,118 @@ Lo que NO funcionó (documentado para no repetir callejones sin salida):
   buffer tras cargar las clases; estas viven SOLO como contenedores
   `[anon:dalvik-DEX data]` de ART.
 
-## La última capa de defensa (veredicto del boot test, 2026-09-07)
+## La última capa de defensa (veredicto del boot test, corregido 2026-09-08)
 
-El APK reconstruido sin packer (con el stub no-op `s.h.e.l.l.C` y la
-`libijmDataEncryption.so` capturada incluida) arranca el código REAL
-de la app: `FacebookInitProvider` se inicializa,
-`com.mobile.brasiltv.app.App.onCreate` se ejecuta - y muere en el
-primer método protegido nativamente por el packer
-(`com.arialyy.aria.orm.SqlHelper.getDb`, `UnsatisfiedLinkError`).
+### Lo que demostraron los fixes del rebuild v3-v5
 
-Ese crash **es la prueba de que el desempaquetado funcionó** (el
-proceso ejecuta las clases recuperadas), y la razón por la que no puede
-ir más lejos es la última línea de defensa de iJiami, verificada de
-punta a punta:
+Tres defectos reales impedían que el APK reconstruido sin packer
+alcanzara el código propio de la app. Los tres se arreglaron
+empíricamente (runs 34164306975, 34166250339, 34166188171):
 
-1. **Vinculación de firma por-app**: la app embebe
-   `com.ijm.residconfusion.ConfusionUtils` (el SDK de identidad de
-   recursos de iJiami) cuyo `cc()` admite exactamente un MD5 de
-   certificado real - `545A2148B8864DB769E025EA43C6A699` - que
-   verificamos que ES el MD5 del certificado de firma original del APK
-   (META-INF/XXL-OTT.RSA). Con cualquier otra firma lanza un intent
-   HOME y `System.exit(0)`.
-2. **Registro nativo condicionado a la firma**: la protección de
-   métodos a nivel SO de iJiami movió cuerpos de métodos (el
-   `SqlHelper` de Aria, el SDK EFS de prefs cifradas, ~20+ métodos) a
-   `libijmDataEncryption.so`; el `dowork()` del DE SDK corre en
-   silencio pero solo registra esos nativos para la firma ORIGINAL.
-   Un build sin packer y re-firmado jamás los completará (el packer
-   hace exactamente lo que promete).
+1. **El SDK DE jamás se cargaba.** `DETool.loadDEso` tiene CERO
+   llamadores en el DEX descifrado (el stub `S.sp()` refleja una
+   sobrecarga `loadDEso(String,String,String)` que no existe en el
+   SDK DE 4.3.4 - la entrada real es `loadDEso(Context)`; la carga la
+   hacía el loader nativo del packer antes de entregar el control a
+   la Application real). Fix:
+   `unpack/stubs/src/com/youcine/re/BootProvider.java` - un
+   ContentProvider (instalado por `installContentProviders()` ANTES
+   de `Application.onCreate`, el mismo patrón de init temprano que
+   FacebookInitProvider) que llama `loadDEso` por reflexión y, en
+   runtimes traducidos, hace su propia copia/carga/`dowork` con la
+   ABI que el linker realmente acepta.
+2. **La trampa de ABI.** En el emulador x86_64 la app corre bajo
+   ndk_translation: la sonda de DETool (`/proc/self/exe`) elige la
+   arquitectura ANFITRIÓN (x86_64) pero el namespace de dlopen
+   traducido solo acepta la `primaryCpuAbi` instalada (arm64-v8a):
+   `dlopen failed: is for EM_X86_64 (62) instead of EM_AARCH64
+   (183)`. El BootProvider compara la sonda de DETool con
+   `primaryCpuAbi` (reflexión) / `nativeLibraryDir` (pública) y
+   rescata la carga. Verificado en el run 34166250339:
+   `System.load(...) OK` + `DETool.dowork -> true`.
+3. **El kill-switch de firma.** `App.onCreate` también llama a
+   `ConfusionUtils.check()`, que lanza el hilo vigilante que
+   allowlistea solo el MD5 del certificado original y dispara `HOME +
+   System.exit(0)` en builds re-firmadas (observado en el logcat del
+   run 34142729238, 16:21:55.059). Fix: `unpack/patch_confusion_cc.py`
+   reescribe TODA la región de insns de `cc()` como `const/4 v0,1 ;
+   return v0 ; nop-fill` (mismo tamaño, tries=0 - parchear solo el
+   prefijo deja código muerto desalineado que el paso lineal del
+   verificador de ART rechaza, run 34164727188: "register index out
+   of range (12 >= 3)").
 
-**Consecuencia**: un APK modificado/re-firmado que arranque por
-completo es imposible sin re-implementar cada método protegido en Java
-- que es precisamente el objetivo de la protección. Los entregables de
-investigación quedan: los 5 dex descifrados (11,9/11,5/10,9/6,3/0,6
-MB, decompilables con jadx, 2.596+ clases) en el Release
-`unpacked-1.17.6` y los artefactos `dumps-redroid`, más un pipeline de
-desempaquetado reproducible nativo de GitHub Actions.
+### Dónde se detiene la app realmente, y por qué (mecanismo corregido)
 
-El workflow **Boot test** codifica este veredicto: una muerte del
-proceso DENTRO del código `com.mobile.brasiltv.*` (no en `s.h.e.l.l.*`)
-se reporta como `RESEARCH OUTCOME - UNPACK VERIFIED`.
+Con los tres fixes, el build v5 llega más lejos que nunca: todos los
+providers se inicializan, el `App.onCreate` real se ejecuta,
+ConfusionUtils queda neutralizado, el SDK DE se inicializa (`DE:
+DECRYPT cost time 14 ms`, `DE: ms_sm4_001 datapath=...
+sp_version=1.4`) - y el hilo main sigue muriendo en el primer método
+protegido por VMP de iJiami: `App.onCreate:139 -> Aria.init ->
+SqlHelper.getDb -> UnsatisfiedLinkError`.
+
+El entendimiento corregido de la última capa de defensa (en sustitución
+de la hipótesis anterior de "registro de nativos gated por firma en el
+SDK DE", que el run v5 desmintió - la lib DE carga, `dowork` devuelve
+true y `SqlHelper.getDb` sigue sin registrarse):
+
+1. **`libijmDataEncryption.so` NO es el registrador de métodos.** El
+   SDK DE es el **motor SM4 de SharedPreferences cifradas** del SDK
+   EFS integrado por el vendor (`com.efs.sdk.*`): su `dowork(key,
+   1024, hash, ...)` inicializa el datapath SM4. Funciona sin
+   problemas en un build re-firmado (`dowork -> true`).
+2. **Los ~805 métodos ACC_NATIVE** (17 de Aria, 424 de
+   `com.mobile.brasiltv.*`, 53 de Facebook, EFS, ...) reciben sus
+   implementaciones JNI en runtime por el **motor de libexec con gate
+   de contenido** - el mismo cuya comprobación ed25519/`signed.bin`
+   exige el APK original byte-exacto (ver 03-protecciones-y-bypass.md,
+   L2). Quitar el packer elimina al único registrador.
+3. **Los ~45.238 stubs de extracción `return-void+nop`** (13.478
+   constructores + 31.760 métodos void - cada `Companion.<init>`,
+   listener anónimo, `configView` de cada activity...) son cuerpos que
+   iJiami extrajo al empaquetar y re-materializa en las páginas DEX en
+   memoria solo conforme se cargan las clases - otra vez desde los
+   blobs cifrados de libexec. El dump capturó las clases del
+   boot-path ya restauradas (por eso `App.onCreate` ejecuta código
+   real) y todo lo demás aún como stub: p. ej.
+   `com.facebook.appevents.AppEvent$SerializationProxyV2$Companion.<init>`
+   y `tv.danmaku.ijk.media.player.ExoMediaPlayer$1.<init>` fallan el
+   verificador con "Constructor returning without calling superclass
+   constructor" (ya visible como rechazos de dex2oat en los logs v3).
+
+**Consecuencia**: un build sin packer y re-firmado arranca el proceso
+real de la app a través de todas las capas no protegidas y se detiene
+en el primer método VMP - por diseño. El boot completo exige
+re-materializar los ~805 cuerpos nativos y los ~45k stubs, que viven
+únicamente dentro del motor del packer con gate de contenido. Los
+entregables de investigación se mantienen: los 5 dex descifrados
+(11,9/11,5/10,9/6,3/0,6 MB, decompilables con jadx, 2.596+ clases) en
+el release `unpacked-1.17.6` (los dex prístinos del dump ahora
+fijados en el release inmutable `dumps-1.17.6`) y un pipeline
+reproducible y determinista nativo de GitHub Actions
+(`rebuild-fix.yml`, bucle rápido: toma fuentes solo de
+`packed-1.17.6` + `dumps-1.17.6`, verifica por aserción los parches
+dentro del APK publicado y encadena el boot test).
+
+### Fase 2 (el único camino restante a un build que bootea completo)
+
+1. **Frida en la ejecución redroid arm64 del APK ORIGINAL**: hookear
+   `RegisterNatives` para capturar la tabla completa método->fnPtr y
+   dumpear los cuerpos nativos; forzar la carga de todas las clases
+   (barrido de warm-up) para que libexec re-materialice los ~45k
+   stubs en las páginas DEX, y re-dumpear. La infraestructura
+   existente (`frida-scripts/` + `unpack/redroid_flow.sh`) es el punto
+   de partida.
+2. Reconstruir con los dex re-dumpeados; los 805 nativos restantes
+   necesitarían un puente (de-natificar con cuerpos Java para las
+   familias open source - Aria/Facebook - y un shim registrador para
+   los 424 propios del vendor).
+
+El workflow **Boot test** codifica el veredicto honesto: la muerte del
+hilo main dentro de código `com.mobile.brasiltv.*`/`com.arialyy.*` se
+reporta como `RESEARCH OUTCOME - UNPACK VERIFIED`, y un `BOOT OK` real
+ahora exige hilo main vivo + activity resumida + ventana youcinemobile
+con foco (el run 34166250339 produjo inicialmente un "BOOT OK"
+FALSO-POSITIVO: el crash handler de la propia app murió en un
+VerifyError de un stub y dejó un proceso zombi con ventana negra -
+ver los comentarios del workflow).

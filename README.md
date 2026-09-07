@@ -86,14 +86,27 @@ portal hosts.
    packer-free build on an arm64 emulator and verifies the real
    `com.mobile.brasiltv.*` UI boots (screenshots + logcat + dumpsys).
 
-## Status (2026-09-07)
+## Status (2026-09-08)
 
 Every tool in the pipeline is finished and validated piece by piece
-across ~25 instrumented CI runs; see
+across ~30 instrumented CI runs; see
 [docs/en/03-protections-and-bypass.md](docs/en/03-protections-and-bypass.md)
 for the complete layer-by-layer map (ABI/translation trap, SecLLVM,
 content-integrity gate, the raw-syscall/int3/ud2/SIGSEGV death ladder and
 its neutralization in `unpack/trace_guard.c`).
+
+The packer-free rebuild now boots the REAL app as far as physically
+possible (rebuild v5, `rebuild-fix.yml` fast loop): a
+`com.youcine.re.BootProvider` loads the iJiami DE SDK (SM4 prefs
+engine) before `Application.onCreate` - including the ndk_translation
+ABI rescue - the embedded signature kill-switch
+(`ConfusionUtils.cc`) is neutralized by minimal DEX surgery, and the
+process runs every non-protected layer until the first iJiami-VMP
+method (`SqlHelper.getDb`). Full boot is impossible without the
+packer's content-gated engine: the ~805 ACC_NATIVE bodies and ~45k
+extraction stubs are materialized only by libexec at runtime. See the
+corrected verdict in
+[docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
 
 The empirical conclusion of the hosted-CI research: **ARM guests are
 impossible on GitHub-hosted runners** (Linux launcher refuses arm64 AVDs
@@ -120,9 +133,10 @@ command away:
   enabled; `rebuild` and **Boot test** then run automatically end-to-end.
 
 Full details: [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
-4. GitHub Action **Boot test** installs the unpacked APK on an **arm64**
-   emulator (ijkplayer / Ranger JNI have no x86_64 builds) and stores logcat
-   plus a screenshot.
+
+Fast iteration: the **Rebuild fix (fast loop)** workflow re-derives the
+build deterministically from the immutable `packed-1.17.6` +
+`dumps-1.17.6` releases and chains the boot test.
 
 Frida scripts under `frida-scripts/` remain as an in-process alternative.
 `libexec` calls `ptrace`; if the agent is killed, the memdump path still works.

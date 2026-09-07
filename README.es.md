@@ -88,15 +88,28 @@ saliendo de los hosts del portal.
    que la UI real `com.mobile.brasiltv.*` arranca (screenshots + logcat +
    dumpsys).
 
-## Estado (2026-09-07)
+## Estado (2026-09-08)
 
 Cada herramienta del pipeline esta terminada y validada pieza por pieza a
-lo largo de ~25 ejecuciones instrumentadas en CI; ver
+lo largo de ~30 ejecuciones instrumentadas en CI; ver
 [docs/es/03-protecciones-y-bypass.md](docs/es/03-protecciones-y-bypass.md)
 para el mapa completo capa por capa (trampa de ABI/traduccion, SecLLVM,
 gate de integridad de contenido, la escalera de muerte
 raw-syscall/int3/ud2/SIGSEGV y su neutralizacion en
 `unpack/trace_guard.c`).
+
+El rebuild sin packer ahora arranca la app REAL hasta donde fisicamente
+es posible (rebuild v5, bucle rapido `rebuild-fix.yml`): un
+`com.youcine.re.BootProvider` carga el SDK DE de iJiami (motor SM4 de
+prefs) antes de `Application.onCreate` - incluido el rescate de ABI bajo
+ndk_translation - el kill-switch de firma embebido (`ConfusionUtils.cc`)
+queda neutralizado por cirugia DEX minima, y el proceso recorre todas las
+capas no protegidas hasta el primer metodo VMP de iJiami
+(`SqlHelper.getDb`). El boot completo es imposible sin el motor del
+packer con gate de contenido: los ~805 cuerpos ACC_NATIVE y los ~45k
+stubs de extraccion solo los materializa libexec en runtime. Ver el
+veredicto corregido en
+[docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
 
 La conclusion empirica de la investigacion en CI: **los invitados ARM son
 imposibles en los runners alojados de GitHub** (el launcher de Linux
