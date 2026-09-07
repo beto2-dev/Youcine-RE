@@ -229,7 +229,7 @@ jobs:
             --title 'Phase 2 frida capture 1.17.6' \
             --notes 'Frida RegisterNatives table + class warm-up + re-dump of the ORIGINAL packed APK in native-arm64 redroid (ubuntu-24.04-arm). See docs/en/06-dynamic-unpack.md, section "Phase 2".' \
             --target "$GITHUB_SHA" || true
-          for asset in work/phase2/jni_table.json work/phase2/warmup_stats.json work/phase2/summary.json; do
+          for asset in work/phase2/jni_table.json work/phase2/warmup_stats.json work/phase2/summary.json work/phase2/inproc/keys.jsonl; do
             if [ -f "$asset" ]; then
               gh release upload phase2-1.17.6 -R "$GITHUB_REPOSITORY" "$asset" --clobber || true
             else

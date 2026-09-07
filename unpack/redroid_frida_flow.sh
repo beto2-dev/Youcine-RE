@@ -493,12 +493,42 @@ adb -s "$DEV" shell pidof "$SV_NAME" >/dev/null 2>&1 || echo "::warning::frida-s
 if [ ! -f unpack/frida_phase2_driver.py ]; then
   echo "::error::unpack/frida_phase2_driver.py is missing (agent 2-a owns it) - the phase-2 driver cannot run"
 fi
+# tools/memread: the driver's step 13 (authoritative pread64 re-dump, which
+# crosses the -wxp no-read pieces the in-proc reads cannot) passes
+# --memread tools/memread - resolved at the REPO ROOT, not under work/.
+# Same recipe as the PROVEN redroid_flow.sh (run 34133100459): static build,
+# host aarch64 == device aarch64.  Without it dexdata_extract.py degrades
+# to a warning and produces no re-dump.
+if [ ! -f tools/memread ]; then
+  if command -v gcc >/dev/null 2>&1; then
+    gcc -static -O2 -o tools/memread tools/memread.c 2>/dev/null \
+      || echo "::warning::memread compile failed - the authoritative pread64 re-dump (driver step 13) will be degraded"
+  else
+    echo "::warning::no gcc on runner - the authoritative pread64 re-dump (driver step 13) will be degraded"
+  fi
+fi
+[ -f tools/memread ] && echo "tools/memread ready ($(stat -c '%s bytes' tools/memread)) for driver step 13"
+# ijiami-static vector A: capture_aes_key.js hooks the AES key-material
+# entry points (AES_set_*_key / EVP_*Init / mbedtls / tiny-AES) AND scans
+# libexec.so for the AES S-box, feeding keys.jsonl on the device (the
+# driver pulls it into work/phase2/inproc/ and notes every aes_key event).
+# Canonical copy lives in ijiami-static/ - staged into frida-scripts/ at
+# runtime so there is exactly ONE source of truth in the repo.
+if [ -f ijiami-static/capture_aes_key.js ]; then
+  cp ijiami-static/capture_aes_key.js frida-scripts/capture_aes_key.js
+  PHASE2_GUARDS="02_bypass_ptrace.js,capture_aes_key.js"
+  echo "AES key capture wired: GUARD_SCRIPTS=$PHASE2_GUARDS"
+else
+  PHASE2_GUARDS="02_bypass_ptrace.js"
+  echo "::warning::ijiami-static/capture_aes_key.js missing - running phase 2 without AES key capture"
+fi
 # keep the pre-driver boot log, then start a clean logcat for the app phase
 adb -s "$DEV" logcat -d -b main,system,crash > work/logcat-boot-phase2.txt 2>&1 || true
 adb -s "$DEV" logcat -c >/dev/null 2>&1 || true
 DRIVER_RC=0
 ANDROID_SERIAL="$DEV" APP_ID="$APP_ID" FRIDA_REMOTE="127.0.0.1:4789" \
   DEX_DIR="work/dumps-dex" OUT_DIR="work/phase2" \
+  GUARD_SCRIPTS="$PHASE2_GUARDS" \
   python3 unpack/frida_phase2_driver.py || DRIVER_RC=$?
 echo "phase-2 driver exit code: $DRIVER_RC"
 echo "$DRIVER_RC" > work/phase2-driver.exit || true
