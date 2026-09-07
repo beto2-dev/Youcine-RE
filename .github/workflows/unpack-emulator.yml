@@ -127,8 +127,9 @@ jobs:
           target: google_apis
           # -prop values are injected at boot and win over build.prop:
           # apps run non-debuggable (no JDWP) while ro.secure=0 keeps adbd
-          # root for the /proc/<pid>/mem sweep.
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -prop ro.debuggable=0 -prop ro.secure=0
+          # root for the /proc/<pid>/mem sweep. ro.kernel.qemu=0 tests
+          # whether boot props override the kernel-cmdline-derived value.
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -prop ro.debuggable=0 -prop ro.secure=0 -prop ro.kernel.qemu=0
           disable-animations: true
           script: bash unpack/nodebug_flow.sh || true
 
@@ -155,6 +156,8 @@ jobs:
             work/logcat-nodebug.txt
             work/dmesg-linker.txt
             work/props-evidence.txt
+            work/qemu-devices.txt
+            work/qemu-props.txt
             work/public-libraries.txt
             work/default-prop.txt
             work/abi-info.txt

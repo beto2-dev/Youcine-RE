@@ -56,6 +56,23 @@ sleep 5
 echo "adb identity: $(adb shell id 2>/dev/null | tr -d '\r' | head -1)"
 echo "SELinux: $(adb shell getenforce 2>/dev/null | tr -d '\r')"
 
+# ---- anti-detection hardening (decrypted-string evidence, see ----------
+# static-analysis/ghidra-exports/decrypted-strings-rw.txt): the packer checks
+#   * su/magisk file paths  -> rename them out of sight (remount rw)
+#   * /dev/qemu_pipe /dev/goldfish_pipe /dev/socket/qemud -> rename the device
+#     nodes (existing emulator FDs keep working: adb stays alive, new opens
+#     by the app fail)
+#   * ro.kernel.qemu + init.svc.qemud/qemu-props + qemu.* props -> -prop
+#     injection is tested at boot; runtime patching via build.prop only
+#     affects non-ro props, so the emulator-options route is the one to watch.
+adb remount || true
+adb shell "mount -o remount,rw /system 2>/dev/null" || true
+adb shell "for p in /system/bin/su /system/xbin/su /system/sbin/su /sbin/su /vendor/bin/su /su/bin/su; do [ -e \$p ] && mv \$p \$p.hidden && echo \"hidden \$p\"; done" || true
+adb shell "for d in /dev/qemu_pipe /dev/goldfish_pipe /dev/socket/qemud /dev/socket/baseband_genld /dev/socket/goldfish_pipe; do [ -e \$d ] && mv \$d \$d.hdn 2>/dev/null && echo \"hidden \$d\"; done" || true
+adb shell "ls -la /dev/qemu_pipe* /dev/goldfish* /dev/socket/qemud* 2>/dev/null" | tee work/qemu-devices.txt || true
+echo "ro.kernel.qemu=$(adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r')"
+adb shell "getprop | grep -iE 'qemu|goldfish' | head -20" | tee work/qemu-props.txt || true
+
 # ---- environment evidence (anti-analysis documentation material) ----------
 adb shell "getprop | grep -iE 'qemu|debug|secure|tags|fingerprint|model|hardware|abilist'" \
   | tee work/props-evidence.txt || true
