@@ -193,3 +193,42 @@ What did NOT work (documented so nobody retries blind alleys):
   after class loading; the classes live on ONLY as ART's
   `[anon:dalvik-DEX data]` containers (which magic scans can still
   miss due to the dd high-address quirk - hence pread64).
+
+## The final defense layer (boot-test verdict, 2026-09-07)
+
+The rebuilt packer-free APK (with the no-op `s.h.e.l.l.C` stub + the
+captured `libijmDataEncryption.so` bundled) boots the app's REAL code:
+`FacebookInitProvider` inits, `com.mobile.brasiltv.app.App.onCreate`
+executes - and then dies at the first packer-natively-protected method
+(`com.arialyy.aria.orm.SqlHelper.getDb`, `UnsatisfiedLinkError`).
+
+That crash **is the proof the unpacking worked** (the process runs the
+recovered classes), and the reason it cannot go further is iJiami's
+last line of defense, verified end-to-end:
+
+1. **Per-app signature binding**: the app embeds
+   `com.ijm.residconfusion.ConfusionUtils` (the iJiami
+   resource-identity SDK) whose `cc()` allowlists exactly one real
+   certificate MD5 - `545A2148B8864DB769E025EA43C6A699` - which we
+   verified IS the MD5 of the original APK's signing certificate
+   (META-INF/XXL-OTT.RSA). On mismatch it fires a HOME intent and
+   `System.exit(0)`.
+2. **Signature-gated native registration**: iJiami's method-level SO
+   protection moved method bodies (Aria's `SqlHelper`, the EFS
+   encrypted-prefs SDK, ~20+ methods) into `libijmDataEncryption.so`;
+   the DE SDK's `dowork()` init runs silently but only registers those
+   natives for the ORIGINAL signature. A re-signed packer-free build
+   can never complete them (the packer is doing exactly what it was
+   sold to do).
+
+**Consequence**: a modified/re-signed APK that fully boots is
+impossible without re-implementing every protected method in Java -
+which is precisely the protection goal. The research deliverables
+stand: all 5 decrypted dexes (11.9/11.5/10.9/6.3/0.6 MB,
+jadx-decompilable, 2,596+ classes) in the `unpacked-1.17.6` Release
+and the `dumps-redroid` artifacts, plus a reproducible
+GitHub-Actions-native unpack pipeline.
+
+The **Boot test** workflow encodes this verdict: a process death
+inside `com.mobile.brasiltv.*` code (not in `s.h.e.l.l.*`) is reported
+as `RESEARCH OUTCOME - UNPACK VERIFIED`.
