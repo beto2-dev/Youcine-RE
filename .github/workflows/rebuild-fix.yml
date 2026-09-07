@@ -131,9 +131,13 @@ jobs:
           import zipfile
           z = zipfile.ZipFile("work/youcine-1.17.6-unpacked.apk")
           d = z.read("classes.dex")
+          # cc() body: const/4 v0,1 ; return v0 ; nop-fill (no misaligned
+          # dead code for the ART verifier's linear pass - run 34164727188)
           assert d[0x9bcbc0:0x9bcbc4] == bytes.fromhex("12100f00"), "cc patch missing"
-          assert d[0x9bccc4:0x9bccc6] == bytes.fromhex("0e00"), "e patch missing"
-          print("[+] ConfusionUtils cc/e patches verified inside the APK")
+          assert d[0x9bcbc4:0x9bcbc0 + 100] == b"\x00" * 96, "cc nop-fill missing"
+          # e() stays byte-identical (original first insn: new-instance v1)
+          assert d[0x9bccc4:0x9bccc6] == bytes.fromhex("2201"), "e() must stay original"
+          print("[+] ConfusionUtils cc nop-fill verified inside the APK")
           # binary AXML stores the string pool as UTF-16LE
           man = z.read("AndroidManifest.xml")
           probes = (

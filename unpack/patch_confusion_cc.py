@@ -10,17 +10,26 @@ which is ALWAYS the case for a re-signed research build - it fires
 e(): HOME intent + System.exit(0). The CI boot log shows this exit firing
 ~0.3s after the SqlHelper.getDb crash (run 34142729238, logcat 16:21:55).
 
-This tool performs minimal binary DEX surgery, keeping every structure
-offset identical:
+This tool performs binary DEX surgery on cc(String)Z only:
 
-  cc(Ljava/lang/String;)Z  ->  const/4 v0, 1 ; return v0
-  e()V                     ->  return-void
+  cc(Ljava/lang/String;)Z  ->  const/4 v0, 1 ; return v0 ; nop-fill
 
-Only the first 2/4 bytes of each code item are overwritten; the remaining
-original bytes become unreachable dead code, so tries/handlers and every
-other structure stay valid for the verifier. DEX checksums (sha1 then
-adler32, in that order - see validate_and_extract_dex.py) are recomputed
-afterwards so ART accepts the file.
+The whole insn region is rewritten (return sequence + nop padding up to
+the original insns_size), so no misaligned dead instruction survives the
+ART verifier's linear pass. cc has tries_size == 0, so nothing follows the
+insns except possible 4-byte alignment padding - untouched.
+
+e() is deliberately NOT patched: it is only reachable from checkThread's
+no-match path, which becomes unreachable once cc() always returns true
+(the original app with its valid signature took the same path and lived).
+Leaving e() byte-identical keeps its try/catch structure exactly as the
+packer shipped it (run 34164727188 showed that prefix-patching a method
+with try handlers leaves the verifier re-decoding misaligned dead code:
+"register index out of range (12 >= 3)").
+
+DEX checksums (sha1 then adler32, in that order - see
+validate_and_extract_dex.py) are recomputed afterwards so ART accepts the
+file.
 
 Usage:
   python3 patch_confusion_cc.py --dex classes.dex --out classes.patched.dex
@@ -39,11 +48,9 @@ TARGET_CLASS = "Lcom/ijiami/residconfusion/ConfusionUtils;"
 PATCH_CC_NAME = "cc"
 PATCH_CC_DESC_PREFIX = "(Ljava/lang/String;)"
 PATCH_CC_RET = "Z"
-PATCH_CC_BYTES = bytes.fromhex("12100f00")  # const/4 v0,1 ; return v0
-PATCH_E_NAME = "e"
-PATCH_E_DESC_PREFIX = "()"
-PATCH_E_RET = "V"
-PATCH_E_BYTES = bytes.fromhex("0e00")      # return-void
+# const/4 v0, #1 ; return v0
+PATCH_CC_HEAD = bytes.fromhex("12100f00")
+NOP = b"\x00\x00"
 
 
 def uleb128(data, off):
@@ -66,7 +73,7 @@ def read_mutf8_string(data, string_data_off):
 
 class Dex:
     """Minimal read/write DEX view. All offsets stay byte-stable under the
-    patches we apply (first-insn overwrite only)."""
+    patches we apply (full-insn-region rewrite of the same size)."""
 
     def __init__(self, data: bytearray):
         self.data = data
@@ -140,9 +147,10 @@ class Dex:
                 code_off, off = uleb128(data, off)
                 yield method_idx, access, code_off
 
-    def patch_method(self, class_desc, name, desc_prefix, ret, new_bytes):
-        """Overwrite the first bytes of a method's insns.
-        Returns (patched, code_off)."""
+    def nop_fill_method(self, class_desc, name, desc_prefix, ret, head_bytes):
+        """Rewrite the method's whole insn region as
+        head_bytes + nop padding (same total size). Returns
+        (patched, code_off)."""
         for method_idx, _access, code_off in self.iter_methods(class_desc):
             _cls, mname, mdesc = self.method_id(method_idx)
             if mname == name and mdesc.startswith(desc_prefix) and mdesc.endswith(ret) and code_off:
@@ -150,14 +158,20 @@ class Dex:
                 debug_info_off = struct.unpack_from("<I", self.data, code_off + 8)[0]
                 insns_size = struct.unpack_from("<I", self.data, code_off + 12)[0]
                 insns_off = code_off + 16
-                if insns_size * 2 < len(new_bytes):
+                if tries != 0:
+                    print(f"[!] {name}{mdesc}: tries_size={tries}; "
+                          "refusing to rewrite (handler structure would break)")
+                    return False, code_off
+                if insns_size * 2 < len(head_bytes):
                     print(f"[!] {name}{mdesc}: insns too small; skipped")
                     return False, code_off
-                old = bytes(self.data[insns_off : insns_off + len(new_bytes)])
-                self.data[insns_off : insns_off + len(new_bytes)] = new_bytes
+                old_head = bytes(self.data[insns_off : insns_off + len(head_bytes)])
+                body = head_bytes + NOP * (insns_size - len(head_bytes) // 2)
+                self.data[insns_off : insns_off + insns_size * 2] = body
                 print(
-                    f"[+] {class_desc}->{name}{mdesc}: patched "
-                    f"{old.hex()} -> {new_bytes.hex()} "
+                    f"[+] {class_desc}->{name}{mdesc}: body rewritten "
+                    f"{old_head.hex()} -> {head_bytes.hex()} + "
+                    f"{insns_size - len(head_bytes) // 2} nops "
                     f"(code_off=0x{code_off:x}, regs={regs}, ins={ins}, "
                     f"outs={outs}, tries={tries}, debug=0x{debug_info_off:x}, "
                     f"insns={insns_size}u)"
@@ -187,14 +201,11 @@ def main() -> int:
         print(f"[!] class {TARGET_CLASS} not present in {src}; nothing to do")
         return 2
 
-    ok_cc, _ = dex.patch_method(
-        TARGET_CLASS, PATCH_CC_NAME, PATCH_CC_DESC_PREFIX, PATCH_CC_RET, PATCH_CC_BYTES
+    ok, _ = dex.nop_fill_method(
+        TARGET_CLASS, PATCH_CC_NAME, PATCH_CC_DESC_PREFIX, PATCH_CC_RET, PATCH_CC_HEAD
     )
-    ok_e, _ = dex.patch_method(
-        TARGET_CLASS, PATCH_E_NAME, PATCH_E_DESC_PREFIX, PATCH_E_RET, PATCH_E_BYTES
-    )
-    if not (ok_cc or ok_e):
-        print("[!] no target method patched")
+    if not ok:
+        print("[!] cc not patched; refusing to write")
         return 1
 
     repair_checksums(data)
