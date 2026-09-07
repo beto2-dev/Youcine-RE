@@ -716,8 +716,14 @@ jobs:
             APK="work/packed.apk"
           fi
           mkdir -p dexs
+          DUMPDIR=""
+          for d in dumps/dumped/youcine dumps/youcine; do
+            [ -d "$d" ] && DUMPDIR="$d" && break
+          done
+          [ -z "$DUMPDIR" ] && DUMPDIR=dumps/youcine
+          echo "dump dir: $DUMPDIR"
           python3 unpack/validate_and_extract_dex.py \
-            --dump-dir dumps/youcine --out-dir dexs --min-size 65536 || true
+            --dump-dir "$DUMPDIR" --out-dir dexs --min-size 65536 || true
           ls -la dexs/ || true
           if ls dexs/*.dex >/dev/null 2>&1; then
             keytool -genkeypair -keystore work/re.keystore -storepass android \
