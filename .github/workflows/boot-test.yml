@@ -123,31 +123,54 @@ jobs:
           echo "== am start =="
           cat work/am_start.txt 2>/dev/null || true
           echo "== DE SDK load evidence (YoucineRE/DETool/System.exit) =="
-          grep -E "YoucineRE|DETool|System\.exit|libijmDataEncryption" work/logcat.txt | head -25 || echo "(none)"
+          grep -E "YoucineRE|DETool|System\.exit|libijmDataEncryption|DE :" work/logcat.txt | head -25 || echo "(none)"
           echo "== alive checks =="
           cat work/alive1.txt work/alive2.txt 2>/dev/null || true
           echo "== real app refs in dumpsys =="
           cat work/real_app_refs.txt 2>/dev/null || echo 0
+          echo "== window focus =="
+          grep -E "mCurrentFocus|mFocusedApp" work/windows.txt 2>/dev/null | head -3 || echo "(no focus)"
           echo "== crash lines =="
           cat work/crash_lines.txt 2>/dev/null || echo "(none)"
           echo "== summary =="
-          if grep -q "APP_DEAD" work/alive2.txt 2>/dev/null; then
+          # v5 (run 34166250339) exposed a FALSE-POSITIVE 'BOOT OK': the main
+          # thread died at App.onCreate:139 -> Aria.init -> SqlHelper.getDb
+          # (UnsatisfiedLinkError: the 805 packer-natified methods are
+          # registered by libexec's content-gated engine, NOT by the DE SDK -
+          # 'DE: ms_sm4_001' proves libijmDataEncryption is the SM4
+          # encrypted-SharedPreferences engine), the app's own crash handler
+          # then died on an extraction-stub VerifyError, leaving a ZOMBIE
+          # process: pidof alive, activity record 'resumed', but
+          # mCurrentFocus=null and a 4 KB black screenshot. A real boot
+          # therefore requires ALL of: no FATAL EXCEPTION on main, a
+          # youcinemobile focused window, and the process alive.
+          MAIN_ALIVE=1
+          grep -q "FATAL EXCEPTION: main" work/crash_lines.txt 2>/dev/null && MAIN_ALIVE=0
+          if [ "$MAIN_ALIVE" = "0" ]; then
             if grep -qE "at com\.(mobile\.brasiltv|ijm\.|arialyy\.|efs\.)" work/crash_lines.txt 2>/dev/null; then
-              echo "::notice::RESEARCH OUTCOME - UNPACK VERIFIED: the process died INSIDE the real unpacked classes"
-              echo "::notice::(com.mobile.brasiltv.app.App.onCreate and onward executed). iJiami's final defense"
-              echo "::notice::layer binds the app-embedded checks (com.ijm.residconfusion.ConfusionUtils allowlists"
-              echo "::notice::ONLY the original signing cert MD5 545A2148B8864DB769E025EA43C6A699) and the DE-SDK"
-              echo "::notice::native-method registration to the developer certificate, so a re-signed packer-free"
-              echo "::notice::build cannot complete those signature-gated natives BY DESIGN. See docs/en/06-dynamic-unpack.md."
+              echo "::notice::RESEARCH OUTCOME - UNPACK VERIFIED: real app code executed (providers, App.onCreate,"
+              echo "::notice::ConfusionUtils neutralized, DE SDK SM4 engine initialized, DETool.dowork -> true) and the"
+              echo "::notice::process died at the first iJiami-VMP-protected method. The 805 ACC_NATIVE bodies and"
+              echo "::notice::the ~45k return-void extraction stubs are materialized at runtime ONLY by the packer's"
+              echo "::notice::content-gated libexec engine, so a re-signed packer-free build stops here BY DESIGN."
+              echo "::notice::Full boot needs the phase-2 frida capture (RegisterNatives table + full body dump)."
+              echo "::notice::See docs/en/06-dynamic-unpack.md."
             else
-              echo "::error::app process is NOT alive at t=85s (no real-app crash signature either - see artifacts)"
+              echo "::error::main thread crashed with no real-app signature - see artifacts"
               exit 1
             fi
+          elif grep -q "APP_DEAD" work/alive2.txt 2>/dev/null; then
+            echo "::error::app process is NOT alive at t=85s and main thread did not crash visibly - see artifacts"
+            exit 1
           fi
-          if grep -qE "ResumedActivity.*com\.mobile\.brasiltv|topResumedActivity.*com\.mobile\.brasiltv|mCurrentFocus.*youcinemobile|mFocusedApp.*youcinemobile" work/activities.txt work/windows.txt 2>/dev/null; then
-            echo "BOOT OK: real YouCine UI resumed"
+          FOCUS_OK=0
+          grep -qE "mCurrentFocus.*(youcinemobile|com\.mobile\.brasiltv)" work/windows.txt 2>/dev/null && FOCUS_OK=1
+          RESUMED_OK=0
+          grep -qE "ResumedActivity.*com\.mobile\.brasiltv|topResumedActivity.*com\.mobile\.brasiltv|mFocusedApp.*youcinemobile" work/activities.txt work/windows.txt 2>/dev/null && RESUMED_OK=1
+          if [ "$MAIN_ALIVE" = "1" ] && [ "$RESUMED_OK" = "1" ] && [ "$FOCUS_OK" = "1" ]; then
+            echo "BOOT OK: real YouCine UI resumed AND focused (main thread alive, real window)"
           else
-            echo "::warning::process alive but YouCine activity not clearly resumed; check screenshots"
+            echo "::warning::process alive but the UI is not really up (main alive=$MAIN_ALIVE resumed=$RESUMED_OK focus=$FOCUS_OK); check screenshots"
           fi
 
       - uses: actions/upload-artifact@v4
