@@ -71,7 +71,7 @@ fi
 #    the real container's rw layer BEFORE docker start (after start, init
 #    has already consumed build.prop).
 # ---------------------------------------------------------------------------
-docker rm -f youcine-re yc-stage >/dev/null 2>&1 || true
+docker rm -f youcine-re youcine-re-fb yc-stage >/dev/null 2>&1 || true
 
 # redroid image tag (run 34119615160: 'android11-latest' does not exist on
 # Docker Hub - the Android 11 tag is '11.0.0-latest'). Make it overridable
@@ -110,31 +110,52 @@ setprop_line() {
   grep -q "^${key}=" "$file" || echo "${key}=${value}" >> "$file"
 }
 
+# replace_line <file> <key> <value>: ONLY replaces a key that already exists.
+# NEVER appends.  Run 34121251995 post-mortem: the pristine control container
+# boots fine but the docker-cp'd one died BEFORE any console output - init
+# aborts while loading build.prop. The original redroid props are
+# PARTITION-SCOPED (ro.product.system.*, ro.product.vendor.*) and appending
+# plain ro.product.model / ro.hardware / ro.bootimage.* to system/build.prop
+# or ro.boot.* to vendor/build.prop violates init's property-context loader
+# (ro.boot.* is cmdline-context only; plain ro.product.* is an alias auto-set
+# by the property service). Identity stragglers are fixed at RUNTIME by the
+# verify-and-fix block (property-area patch + framework restart - no init
+# parse risk, the technique proven on the emulator path since v3).
+replace_line() {
+  local file="$1" key="$2" value="$3"
+  [ -f "$file" ] || return 0
+  if grep -q "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "::warning::replace_line: $key absent from $file - left for the runtime patcher"
+  fi
+}
+
 SAMSUNG_FP="samsung/o1sxxx/o1s:11/RP1A.200720.012/G991BXXU5CUL5:user/release-keys"
 
-# system build.prop: non-debuggable + non-secure + Samsung release identity
-setprop_line work/system-build.prop ro.debuggable 0
-setprop_line work/system-build.prop ro.secure 0            # keeps adbd root - REQUIRED for the memdump
-setprop_line work/system-build.prop ro.build.type user
-setprop_line work/system-build.prop ro.build.tags release-keys
-setprop_line work/system-build.prop ro.product.build.tags release-keys
-setprop_line work/system-build.prop ro.product.build.type user
-setprop_line work/system-build.prop ro.build.fingerprint "$SAMSUNG_FP"
-setprop_line work/system-build.prop ro.product.build.fingerprint "$SAMSUNG_FP"
-setprop_line work/system-build.prop ro.bootimage.build.fingerprint "$SAMSUNG_FP"
-setprop_line work/system-build.prop ro.product.model "SM-G991B"
-setprop_line work/system-build.prop ro.product.brand samsung
-setprop_line work/system-build.prop ro.product.manufacturer samsung
-setprop_line work/system-build.prop ro.product.device o1s
-setprop_line work/system-build.prop ro.product.name o1sxxx
-setprop_line work/system-build.prop ro.hardware qcom
+# system build.prop: REPLACE-ONLY (every key below exists in the original)
+replace_line work/system-build.prop ro.debuggable 0
+replace_line work/system-build.prop ro.secure 0            # keeps adbd root - REQUIRED for the memdump
+replace_line work/system-build.prop ro.build.type user
+replace_line work/system-build.prop ro.build.tags release-keys
+replace_line work/system-build.prop ro.build.fingerprint "$SAMSUNG_FP"
+replace_line work/system-build.prop ro.build.display.id "o1sxxx-user 11 RP1A.200720.012 G991BXXU5CUL5 release-keys"
+replace_line work/system-build.prop ro.build.description "o1sxxx-user 11 RP1A.200720.012 G991BXXU5CUL5 release-keys"
+# partition-scoped identity (these are the keys the image actually defines)
+replace_line work/system-build.prop ro.product.system.model "SM-G991B"
+replace_line work/system-build.prop ro.product.system.brand samsung
+replace_line work/system-build.prop ro.product.system.manufacturer samsung
+replace_line work/system-build.prop ro.product.system.device o1s
+replace_line work/system-build.prop ro.product.system.name o1sxxx
 
 if [ -n "$VENDOR_PROP" ]; then
-  setprop_line "$VENDOR_PROP" ro.product.vendor.model "SM-G991B"
-  setprop_line "$VENDOR_PROP" ro.product.vendor.device o1s
-  setprop_line "$VENDOR_PROP" ro.product.vendor.brand samsung
-  setprop_line "$VENDOR_PROP" ro.vendor.build.fingerprint "$SAMSUNG_FP"
-  setprop_line "$VENDOR_PROP" ro.boot.hardware qcom
+  # replace-only as well: NO ro.boot.* (cmdline context), NO appends
+  replace_line "$VENDOR_PROP" ro.product.vendor.model "SM-G991B"
+  replace_line "$VENDOR_PROP" ro.product.vendor.device o1s
+  replace_line "$VENDOR_PROP" ro.product.vendor.brand samsung
+  replace_line "$VENDOR_PROP" ro.vendor.build.fingerprint "$SAMSUNG_FP"
+  replace_line "$VENDOR_PROP" ro.vendor.build.tags release-keys
+  replace_line "$VENDOR_PROP" ro.vendor.build.type user
 fi
 
 echo "== patched system build.prop (identity lines) =="
@@ -188,21 +209,25 @@ docker rm -f --time 5 yc-control >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 # 4. main container: docker create -> cp patched props in -> docker start
 #    (--tty so init's /dev/console output lands in docker logs)
+#    R31 lesson: 'docker rm -f --time 5' returned before the name was free,
+#    so the fallback 'docker run --name youcine-re' hit a name conflict and
+#    killed the whole job -> the fallback now uses a FRESH name.
 # ---------------------------------------------------------------------------
-docker create --tty --name youcine-re --privileged \
+CNAME="youcine-re"
+docker create --tty --name "$CNAME" --privileged \
   --security-opt apparmor=unconfined \
   -p 5555:5555 -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE"
-docker cp work/system-build.prop youcine-re:/system/build.prop
-[ -n "$VENDOR_PROP" ] && docker cp "$VENDOR_PROP" youcine-re:/vendor/build.prop
-docker start youcine-re || {
-  docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
-  echo "::error::docker start youcine-re failed"
+docker cp work/system-build.prop "$CNAME:/system/build.prop"
+[ -n "$VENDOR_PROP" ] && docker cp "$VENDOR_PROP" "$CNAME:/vendor/build.prop"
+docker start "$CNAME" || {
+  docker logs "$CNAME" > work/docker-redroid.txt 2>&1 || true
+  echo "::error::docker start $CNAME failed"
   exit 1
 }
 
 sleep 5
 echo "== docker logs (first boot, t=5s; --tty so console output is visible) =="
-docker logs --tail 20 youcine-re 2>&1 || true
+docker logs --tail 20 "$CNAME" 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 5. wait for adb + full boot (300s: first boot formats the /data volume)
@@ -215,18 +240,20 @@ for i in $(seq 1 60); do  # 60 x 5s = 300s
   if [ "$ST" = "device" ]; then CONNECTED=1; break; fi
   if [ $((i % 6)) -eq 0 ]; then
     echo "adb connect attempt $i of 60: state='$ST'"
-    docker inspect --format "main: status={{.State.Status}} exit={{.State.ExitCode}}" youcine-re 2>/dev/null || true
-    docker logs --tail 6 youcine-re 2>&1 || true
+    docker inspect --format "main: status={{.State.Status}} exit={{.State.ExitCode}}" "$CNAME" 2>/dev/null || true
+    docker logs --tail 6 "$CNAME" 2>&1 || true
   fi
   sleep 5
 done
 if [ -z "$CONNECTED" ]; then
-  docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
-  docker inspect --format "main final: status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}" youcine-re 2>/dev/null || true
+  docker logs "$CNAME" > work/docker-redroid.txt 2>&1 || true
+  docker inspect --format "main final: status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}" "$CNAME" 2>/dev/null || true
   echo "::warning::patched (docker-cp build.prop) container never became adb-reachable; the control container DID - falling back to a pristine container + runtime property-area patching"
-  docker rm -f --time 5 youcine-re >/dev/null 2>&1 || true
+  # fresh NAME (R31: rm raced and the reuse of 'youcine-re' conflicted)
+  docker rm -f "$CNAME" >/dev/null 2>&1 || true
+  CNAME="youcine-re-fb"
   docker run -d --tty --privileged --security-opt apparmor=unconfined \
-    --name youcine-re -p 5555:5555 \
+    --name "$CNAME" -p 5555:5555 \
     -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE" || {
     echo "::error::fallback docker run failed"
     exit 1
@@ -238,7 +265,7 @@ if [ -z "$CONNECTED" ]; then
     sleep 5
   done
   if [ -z "$CONNECTED" ]; then
-    docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
+    docker logs "$CNAME" > work/docker-redroid.txt 2>&1 || true
     echo "::error::fallback pristine container also failed - giving up"
     exit 1
   fi
@@ -250,13 +277,13 @@ for i in $(seq 1 84); do  # 84 x 5s = 420s
   if [ "$B" = "1" ]; then BOOTED=1; break; fi
   if [ $((i % 6)) -eq 0 ]; then
     echo "== boot wait $((i * 5))s: sys.boot_completed='$B' =="
-    docker logs --tail 6 youcine-re 2>&1 || true
+    docker logs --tail 6 "$CNAME" 2>&1 || true
   fi
   sleep 5
 done
 if [ -z "$BOOTED" ]; then
   adb -s "$DEV" logcat -d -b main,system,crash > work/logcat-redroid.txt 2>&1 || true
-  docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
+  docker logs "$CNAME" > work/docker-redroid.txt 2>&1 || true
   echo "::error::Android did not finish booting within 420s (sys.boot_completed != 1)"
   exit 1
 fi
@@ -411,7 +438,7 @@ python3 unpack/external_memdump.py \
 # 8. evidence capture (ALWAYS - even on failure)
 # ---------------------------------------------------------------------------
 adb -s "$DEV" logcat -d -b main,system,crash > work/logcat-redroid.txt 2>&1 || true
-docker logs youcine-re > work/docker-redroid.txt 2>&1 || true
+docker logs "$CNAME" > work/docker-redroid.txt 2>&1 || true
 echo "== key logcat lines (jdwp presence is the debuggable indicator) =="
 grep -nE "jdwp|s\.h\.e\.l\.l|ijiami|UnsatisfiedLink|FATAL|AndroidRuntime|Fatal signal" \
   work/logcat-redroid.txt | head -40 || true
@@ -421,7 +448,7 @@ if [ -n "$PID" ]; then
   adb -s "$DEV" shell "cat /proc/$PID/maps" 2>/dev/null \
     | grep -E "libexec|ijm|dex|art" | head -24 > work/maps-app-redroid.txt || true
 fi
-docker exec youcine-re dmesg 2>/dev/null \
+docker exec "$CNAME" dmesg 2>/dev/null \
   | grep -iE "dlopen|linker|sigsegv|libexec" | head -60 > work/dmesg-redroid.txt || true
 # the container may not ship the dmesg binary -> host fallback (binder/ashmem health)
 if [ ! -s work/dmesg-redroid.txt ]; then
@@ -448,7 +475,7 @@ echo "dex_count=$n"
 echo "==============================================================="
 echo " redroid_flow.sh summary"
 echo "   image     : $REDROID_IMAGE (native arm64)"
-echo "   container : youcine-re -> $(docker ps --filter name=youcine-re --format '{{.Status}}' 2>/dev/null || echo 'not running')"
+echo "   container : $CNAME -> $(docker ps --filter name=$CNAME --format '{{.Status}}' 2>/dev/null || echo 'not running')"
 echo "   binder    : $(ls /dev/binder* 2>/dev/null | tr '\n' ' ')"
 echo "   dex_count : $n  (unique DEX >= 64 KiB in dumped/youcine)"
 echo "   raw dumps : $(ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l) file(s)"
