@@ -476,6 +476,28 @@ if [ -f work/blackdex64.apk ]; then
   adb -s "$DEV" install -r -g work/blackdex64.apk || \
     echo "::warning::BlackDex64 install failed - continuing to evidence"
   if adb -s "$DEV" shell pm path top.niunaijun.blackdexa64 >/dev/null 2>&1; then
+    # R35 (34125551716) post-mortem: BlackDex's BootstrapClass unseal failed
+    # with NoSuchMethodException VMRuntime.setHiddenApiExemptions (the
+    # hidden-API policy DENIED the meta-reflection) -> BlackBox's framework
+    # hooks never installed -> the sandboxed iJiami stub hit the Android 11
+    # scoped-storage SecurityException on its external cache path
+    # (/storage/emulated/0/Android/data/<target>/cache) -> the death ladder
+    # SIGKILLed the whole blackdexa64 uid (:black + :p0) 40ms later.
+    # Fix: disable hidden-API enforcement globally BEFORE the drive, and
+    # pre-create the target's external dirs owned by the sandbox uid.
+    echo "== disabling hidden-API enforcement for the sandbox =="
+    adb -s "$DEV" shell settings put global hidden_api_policy 1 || true
+    adb -s "$DEV" shell settings put global hidden_api_policy_pre_p_apps 1 || true
+    adb -s "$DEV" shell settings put global hidden_api_policy_p_apps 1 || true
+    adb -s "$DEV" shell settings put global hidden_api_blacklist_exemptions "*" || true
+    BD_UID=$(adb -s "$DEV" shell "dumpsys package top.niunaijun.blackdexa64 | grep -m1 'userId='" 2>/dev/null \
+      | sed 's/.*userId=//' | tr -d '\r ' )
+    echo "BlackDex uid: ${BD_UID:-unknown}"
+    adb -s "$DEV" shell "mkdir -p /storage/emulated/0/Android/data/$APP_ID/cache" 2>/dev/null || true
+    adb -s "$DEV" shell "mkdir -p /storage/emulated/0/Android/data/$APP_ID/files" 2>/dev/null || true
+    if [ -n "$BD_UID" ]; then
+      adb -s "$DEV" shell "chown -R $BD_UID:$BD_UID /storage/emulated/0/Android/data/$APP_ID" 2>/dev/null || true
+    fi
     echo "== driving BlackDex64 (uiautomator automation, native arm64 sandbox) =="
     ANDROID_SERIAL="$DEV" python3 unpack/blackdex_auto.py \
       --app-id "$APP_ID" \
@@ -483,6 +505,19 @@ if [ -f work/blackdex64.apk ]; then
       --out-dir dumped/youcine \
       --serial "$DEV" \
       --timeout 240 || echo "::warning::blackdex_auto did not complete; see output"
+    # retry once with a clean slate (the death ladder auto-restarts zombie
+    # :p0/:black processes that block a fresh dump attempt)
+    if ! ls dumped/youcine/*.dex >/dev/null 2>&1; then
+      echo "== no dex yet - force-stopping BlackDex and retrying once =="
+      adb -s "$DEV" shell am force-stop top.niunaijun.blackdexa64 || true
+      sleep 5
+      ANDROID_SERIAL="$DEV" python3 unpack/blackdex_auto.py \
+        --app-id "$APP_ID" \
+        --label "YouCine" \
+        --out-dir dumped/youcine \
+        --serial "$DEV" \
+        --timeout 240 || echo "::warning::blackdex_auto retry did not complete either"
+    fi
     echo "== blackdex output =="
     ls -la dumped/youcine/ 2>/dev/null | head -20 || true
     adb -s "$DEV" shell "ls -la /storage/emulated/0/Download/dexDump/$APP_ID/ 2>/dev/null" \
