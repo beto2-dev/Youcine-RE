@@ -68,24 +68,17 @@ jobs:
         run: |
           gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
             -p "ycMob_1.17.6_ycsite.apk" -O work/packed.apk
-          gh release download unpacked-1.17.6 -R "$GITHUB_REPOSITORY" \
-            -p "youcine-1.17.6-unpacked.apk" -O work/unpacked-prev.apk
-          sha256sum work/packed.apk work/unpacked-prev.apk
+          gh release download dumps-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "dump-dexes-1.17.6.zip" -O work/dump-dexes.zip
+          sha256sum work/packed.apk work/dump-dexes.zip
 
       - name: Extract the validated dump DEXes
         run: |
-          python3 - <<'PY'
-          import zipfile, pathlib
-          z = zipfile.ZipFile("work/unpacked-prev.apk")
-          out = pathlib.Path("dexs")
-          out.mkdir(exist_ok=True)
-          for info in z.infolist():
-              n = info.filename
-              if n.startswith("classes") and n.endswith(".dex") \
-                      and info.file_size >= 65536:
-                  (out / n).write_bytes(z.read(n))
-                  print("[+]", n, info.file_size)
-          PY
+          # immutable source of truth: the 5 pristine dump DEXes from the
+          # redroid unpack - NEVER source dexes from a previously rebuilt
+          # (possibly patched) unpacked-1.17.6 asset (run 34165962318: the
+          # v4-era e() patch residue made the sanity check fail)
+          unzip -o -q work/dump-dexes.zip -d dexs/
           ls -la dexs/
 
       - name: Compile stubs (no-op s.h.e.l.l.C + BootProvider)
