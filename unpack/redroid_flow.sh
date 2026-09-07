@@ -73,7 +73,17 @@ fi
 # ---------------------------------------------------------------------------
 docker rm -f youcine-re yc-stage >/dev/null 2>&1 || true
 
-docker create --name yc-stage redroid/redroid:android11-latest
+# redroid image tag (run 34119615160: 'android11-latest' does not exist on
+# Docker Hub - the Android 11 tag is '11.0.0-latest'). Make it overridable
+# and pre-verify the manifest so a tag/registry hiccup fails fast and loud.
+REDROID_IMAGE="${REDROID_IMAGE:-redroid/redroid:11.0.0-latest}"
+
+docker manifest inspect "$REDROID_IMAGE" > /dev/null 2>&1 || {
+  echo "::error::manifest for $REDROID_IMAGE not found - check the tag on Docker Hub"
+  exit 1
+}
+
+docker create --name yc-stage "$REDROID_IMAGE"
 docker cp yc-stage:/system/build.prop work/system-build.prop
 if [ ! -s work/system-build.prop ]; then
   echo "::error::could not extract /system/build.prop from the redroid image (docker create/pull or image layout failure)"
@@ -138,7 +148,7 @@ fi
 # 3. create the real container, cp the patched props in, THEN start
 # ---------------------------------------------------------------------------
 docker create --name youcine-re --privileged -p 5555:5555 \
-  -v "$PWD/work/redroid-data:/data" redroid/redroid:android11-latest
+  -v "$PWD/work/redroid-data:/data" "$REDROID_IMAGE"
 docker cp work/system-build.prop youcine-re:/system/build.prop
 [ -n "$VENDOR_PROP" ] && docker cp "$VENDOR_PROP" youcine-re:/vendor/build.prop
 docker start youcine-re || {
@@ -309,7 +319,7 @@ echo "dex_count=$n"
 # ---------------------------------------------------------------------------
 echo "==============================================================="
 echo " redroid_flow.sh summary"
-echo "   image     : redroid/redroid:android11-latest (native arm64)"
+echo "   image     : $REDROID_IMAGE (native arm64)"
 echo "   container : youcine-re -> $(docker ps --filter name=youcine-re --format '{{.Status}}' 2>/dev/null || echo 'not running')"
 echo "   binder    : $(ls /dev/binder* 2>/dev/null | tr '\n' ' ')"
 echo "   dex_count : $n  (unique DEX >= 64 KiB in dumped/youcine)"

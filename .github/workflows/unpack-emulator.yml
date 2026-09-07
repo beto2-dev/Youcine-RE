@@ -71,6 +71,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_nodebug:
+        description: 'skip the nodebug x86_64 job (redroid-only iterations)'
+        required: false
+        default: false
+        type: boolean
       run_selfhosted:
         description: 'run the self-hosted macOS job (requires your own runner)'
         required: false
@@ -87,6 +92,7 @@ permissions:
 jobs:
   unpack-nodebug:
     # PRIMARY: original apk, non-debuggable boot props, root memdump.
+    if: ${{ !inputs.skip_nodebug }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     outputs:
