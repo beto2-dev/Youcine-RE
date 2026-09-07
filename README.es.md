@@ -11,7 +11,7 @@ de 14 KiB (`s.h.e.l.l.S` / `s.h.e.l.l.A`), multi-DEX cifrado en
 
 - **Autores del RE:** beto-2dev, ChapzoMods
 - **Licencia:** GNU GPL 3.0 (`LICENSE`)
-- **Idiomas:** [English](README.md) · [Espanol](README.es.md)
+- **Idiomas:** [English](README.md) · [Espanol](README.es.md) · [中文](README.zh.md) · [Français](README.fr.md)
 - **Alcance:** metodologia para quitar el packer, mapa de protecciones,
   inventario de SDKs, separacion cliente/servidor, pipelines en emulador
 

@@ -9,7 +9,7 @@ sidecar (`com.ijm.dataencryption.DETool`).
 
 - **RE authors:** beto-2dev, ChapzoMods
 - **License:** GNU GPL 3.0 (`LICENSE`)
-- **Languages:** [English](README.md) · [Espanol](README.es.md)
+- **Languages:** [English](README.md) · [Espanol](README.es.md) · [中文](README.zh.md) · [Français](README.fr.md)
 - **Scope:** packer removal methodology, protection map, SDK inventory, client vs server split, emulator pipelines
 
 This repository contains **tools, scripts, and documentation produced during the
