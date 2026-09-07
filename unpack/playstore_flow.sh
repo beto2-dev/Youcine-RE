@@ -24,6 +24,15 @@ BD32_PKG=top.niunaijun.blackdexa32
 BD64_PKG=top.niunaijun.blackdexa64
 TARGET=com.world.youcinemobile
 
+# ---- device guard: never let adb block forever on a dead emulator --------
+if ! timeout 30 adb get-state >/dev/null 2>&1; then
+  echo "::error::no adb device - the playstore emulator is not up"
+  adb devices -l || true
+  tail -40 work/emulator.log 2>/dev/null || true
+  echo "0" > count/dex_count
+  exit 1
+fi
+
 # ---- environment evidence --------------------------------------------------
 adb shell "getprop | grep -iE 'qemu|debug|secure|tags|fingerprint|model|abilist'" \
   | tee work/props-evidence.txt || true

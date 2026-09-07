@@ -213,17 +213,38 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: SDK + playstore AVD
+      - name: "SDK + playstore AVD (self-verifying)"
         env:
           API: ${{ github.event.inputs.api_level || '30' }}
         run: |
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" \
             "system-images;android-${API};google_apis_playstore;x86_64" \
-            "platforms;android-${API}" > /dev/null
+            "platforms;android-${API}" 2>&1 | tail -5 || true
+          # avdmanager fails with EXIT 0 when the package path is invalid
+          # (classic bug) - verify the AVD files actually exist afterwards.
+          ls "$ANDROID_HOME/system-images/android-${API}/google_apis_playstore/x86_64/" || \
+            { echo "::error::playstore image not installed"; exit 1; }
           echo "no" | avdmanager create avd -n youcine-ps \
             -k "system-images;android-${API};google_apis_playstore;x86_64" \
-            -d pixel_4 --force
+            -d pixel_4 --force 2>&1 | tail -3 || true
+          if [ ! -f "$ANDROID_AVD_HOME/youcine-ps.ini" ]; then
+            echo "::warning::AVD not in ANDROID_AVD_HOME; searching..."
+            FOUND=$(find /home/runner /usr/local/lib/android/sdk -name 'youcine-ps.ini' 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              export ANDROID_AVD_HOME="$(dirname "$FOUND")"
+              echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+            else
+              echo "::error::youcine-ps AVD was never created"
+              exit 1
+            fi
+          else
+            echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          fi
+          ls -la "$ANDROID_AVD_HOME" | head -8
+          cat "$ANDROID_AVD_HOME/youcine-ps.ini" 2>/dev/null | head -10
 
       - name: Fetch packed APK + BlackDex
         env:
@@ -245,6 +266,7 @@ jobs:
       - name: Boot playstore emulator (manual)
         run: |
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
           nohup emulator -avd youcine-ps -no-window -gpu swiftshader_indirect \
             -noaudio -no-boot-anim -camera-back none -port 5554 \
             > work/emulator.log 2>&1 &
@@ -253,8 +275,9 @@ jobs:
             [ "$v" = "1" ] && echo "BOOT_OK after $((i*10))s" && exit 0
             sleep 10
           done
-          echo "::warning::playstore boot timeout; continuing anyway"
+          echo "::error::playstore boot timeout"
           tail -30 work/emulator.log || true
+          exit 1
 
       - name: Drive BlackDex (uiautomator automation, no root)
         run: bash unpack/playstore_flow.sh || true
