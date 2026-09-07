@@ -41,6 +41,11 @@ on:
         required: false
         default: true
         type: boolean
+      run_selfhosted:
+        description: 'run the self-hosted macOS job (requires your own runner)'
+        required: false
+        default: false
+        type: boolean
       release_tag:
         default: 'packed-1.17.6'
       release_asset:
@@ -186,6 +191,90 @@ jobs:
             work/logcat-tcg.txt
             work/apk.sha256
             work/emulator.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  unpack-selfhosted-mac:
+    # OPTIONAL completion path: run on YOUR OWN Mac via a self-hosted runner
+    # (Settings -> Actions -> Runners -> New self-hosted runner; labels:
+    # [self-hosted, macOS]). On real hardware Hypervisor.framework works, so
+    # the arm64 emulator runs at FULL SPEED with the ORIGINAL apk - the
+    # cleanest possible dynamic unpack (native ARM, all checks pass).
+    if: ${{ inputs.run_selfhosted }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    outputs:
+      dex_count: ${{ steps.count_sh.outputs.dex_count }}
+    env:
+      APP_ID: com.world.youcinemobile
+      LAUNCH: com.mobile.brasiltv.activity.SplashAty
+      EXPECT_DEX: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + arm64 image + AVD
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-30;google_apis;arm64-v8a" \
+            "platforms;android-30" > /dev/null
+          echo "no" | avdmanager create avd -n youcine-sh \
+            -k "system-images;android-30;google_apis;arm64-v8a" \
+            -d pixel_4 --force
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work dumped/youcine
+          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p ycMob_1.17.6_ycsite.apk -O work/packed.apk
+
+      - name: Boot, install ORIGINAL apk, dump
+        run: |
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          nohup emulator -avd youcine-sh -no-window -gpu swiftshader_indirect \
+            -noaudio -no-boot-anim -camera-back none -port 5554 \
+            > work/emulator.log 2>&1 &
+          for i in $(seq 1 120); do
+            v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$v" = "1" ] && echo "BOOT_OK" && break
+            sleep 10
+          done
+          adb root || true
+          sleep 5
+          adb install -r -g work/packed.apk || true
+          adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
+          adb logcat -c || true
+          adb shell am start -n $APP_ID/$LAUNCH || true
+          python3 unpack/external_memdump.py \
+            --app "$APP_ID" --out-dir dumped/youcine \
+            --expect "$EXPECT_DEX" --timeout 900 --settle 8 || true
+          adb logcat -d -b main,system,crash > work/logcat-selfhosted.txt 2>/dev/null || true
+          mkdir -p count
+          ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l | tr -d ' ' > count/dex_count
+          cat count/dex_count
+
+      - name: Collect output
+        id: count_sh
+        if: always()
+        run: |
+          val=$(cat count/dex_count 2>/dev/null || echo 0)
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-selfhosted
+          path: |
+            dumped/
+            work/logcat-selfhosted.txt
           if-no-files-found: warn
           retention-days: 7
 
@@ -343,8 +432,8 @@ jobs:
           retention-days: 7
 
   rebuild:
-    needs: [unpack-macos-tcg, unpack-x86]
-    if: always() && (needs.unpack-macos-tcg.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0')
+    needs: [unpack-macos-tcg, unpack-x86, unpack-selfhosted-mac]
+    if: always() && (needs.unpack-macos-tcg.outputs.dex_count != '0' || needs.unpack-x86.outputs.dex_count != '0' || needs.unpack-selfhosted-mac.outputs.dex_count != '0')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

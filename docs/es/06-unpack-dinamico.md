@@ -83,28 +83,60 @@ eliminan y el manifest apunta a la clase de aplicación real.
 | 34055917392 / 34057901348 | transplante en packages.xml + relay de SIGSEGV: el gate de contenido bloquea el descifrado de cualquier APK modificada |
 | 34058535954 | el emulador de linux incluye `qemu-system-aarch64` pero el launcher bloquea AVDs arm64 en hosts x86 |
 
-## 6.5 Estado actual y cómo terminar
+## 6.5 Estado final: ARM en runners de GitHub es imposible; terminar en hardware real
 
-Todo el tooling está terminado y validado pieza por pieza. Los pasos
-restantes son pura ejecución:
+La matriz definitiva de entornos (todas las entradas probadas
+empíricamente):
 
-1. Minutos de Actions: los minutos incluidos de la cuenta se agotaron
-   durante la sesión de investigación (los runs de macOS facturan con
-   multiplicador 10x). Espera el reinicio mensual (o aumenta el límite
-   de gasto en Settings -> Billing).
-2. Despacha **Dynamic unpack (emulator)** una vez. `unpack-macos-tcg`
-   arranca el AVD arm64 con `-accel off` (TCG del mismo-arch en el
-   runner Apple Silicon: lento pero totalmente nativo), instala la APK
-   ORIGINAL y dumpea el DEX descifrado. `rebuild` publica entonces el
-   release `unpacked-1.17.6` automáticamente.
-3. Despacha **Boot test (unpacked APK)** una vez. Instala la build
-   reconstruida sin packer en un emulador arm64 y verifica que la UI
-   real de YouCine (SplashAty / MainAty bajo `com.mobile.brasiltv.*`)
-   alcanza `ResumedActivity` con screenshots y logcat como evidencia.
-   NOTA: el workflow de boot-test también debe pasar `-accel off` por la
-   misma razón.
+| Entorno | Veredicto |
+|---|---|
+| Runner Linux x86_64 + AVD x86_64 | KVM funciona, pero la traducción ARM rompe SecLLVM y el gate de contenido bloquea APKs modificadas |
+| Runner Linux x86_64 + AVD arm64 | rechazado por el launcher: `FATAL: Avd's CPU Architecture 'arm64' is not supported ... on x86_64 host` (aunque `qemu-system-aarch64` viene en el paquete) |
+| Runner macOS (Apple Silicon) + AVD arm64, cualquier configuración de accel | qemu siempre inicializa HVF; los runners no tienen entitlement de Hypervisor.framework (`HVF error: HV_UNSUPPORTED`) - `-accel off` NO lo evita (probado en los runs 34063246076 y 34068661659) |
+| Runner macOS + TCG arm64 | no disponible (ver arriba) |
 
-Presupuesto aproximado de las dos ejecuciones: 25-45 min de runner
-macOS (facturados 10x) más 5 min de Linux - planifica los minutos en
-consecuencia, o ejecuta ambos jobs en un runner macOS auto-alojado
-(labels: `macos-14,arm64`), donde los minutos son gratis.
+Dos formas de terminar el dump, ambas a un comando de distancia con las
+herramientas de este repo:
+
+### Opción A - un teléfono Android físico (la clásica; recomendada)
+
+Cualquier dispositivo Android ARM real (la plataforma objetivo del
+packer - todo es nativo y legítimo):
+
+```bash
+# en el teléfono: activa Opciones de desarrollador + Depuración USB, conéctalo
+adb devices                                      # confirma que es visible
+adb root 2>/dev/null || true                     # opcional; el dumper solo
+                                                 # necesita root para leer
+                                                 # /proc/pid/mem
+adb install -r -g ycMob_1.17.6_ycsite.apk        # APK ORIGINAL
+adb shell am start -n com.world.youcinemobile/com.mobile.brasiltv.activity.SplashAty
+ADB="adb" python3 unpack/external_memdump.py \
+    --app com.world.youcinemobile \
+    --out-dir dumped/youcine --expect 4 --timeout 600 --settle 3
+python3 unpack/validate_and_extract_dex.py \
+    --dump-dir dumped/youcine --out-dir dexs --min-size 65536
+python3 unpack/rebuild_unpacked_apk.py \
+    --apk ycMob_1.17.6_ycsite.apk --dump-dir dexs \
+    --out youcine-1.17.6-unpacked.apk \
+    --keystore re.keystore --storepass android
+adb install -r -g youcine-1.17.6-unpacked.apk    # la build sin packer
+```
+
+El teléfono debe estar rooteado para las lecturas de `/proc/<pid>/mem`
+(o usa `adb shell su -c ...` - el dumper ya tiene fallback a `su`).
+
+### Opción B - runner macOS auto-alojado
+
+Registra un runner auto-alojado en tu propio Mac (Settings -> Actions
+-> Runners; labels `[self-hosted, macOS]`). En hardware real
+Hypervisor.framework funciona, así que el emulador arm64 corre a máxima
+velocidad. Despacha luego **Dynamic unpack (emulator)** con el input
+`run_selfhosted` activado: el job `unpack-selfhosted-mac` arranca el AVD
+arm64, instala la APK ORIGINAL y dumpea exactamente como arriba;
+`rebuild` y **Boot test** continúan automáticamente.
+
+Tras el dump: el job `rebuild` (o los comandos locales de arriba)
+producen `youcine-1.17.6-unpacked.apk`, y **Boot test (unpacked APK)**
+verifica en un emulador arm64 (Mac auto-alojado) que la UI real
+`com.mobile.brasiltv.*` arranca con screenshots y logcat como evidencia.

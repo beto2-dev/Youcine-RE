@@ -79,28 +79,59 @@ manifest points at the real application class.
 | 34055917392 / 34057901348 | packages.xml transplant + SIGSEGV relay: the content gate blocks decryption of any modified APK |
 | 34058535954 | linux emulator ships `qemu-system-aarch64` but the launcher blocks arm64 AVDs on x86 hosts |
 
-## 6.5 Current status and how to finish
+## 6.5 Final status: GitHub-hosted ARM is impossible; finish on real hardware
 
-All tooling is finished and validated piece by piece. The remaining
-steps are pure execution:
+The definitive environment matrix (all entries empirically proven):
 
-1. Actions minutes: the account's included minutes were exhausted during
-   the research session (macOS runs bill at a 10x multiplier). Wait for
-   the monthly reset (or top up the spending limit in
-   Settings -> Billing).
-2. Dispatch **Dynamic unpack (emulator)** once. `unpack-macos-tcg` boots
-   the arm64 AVD with `-accel off` (same-arch TCG on the Apple Silicon
-   runner: slow but fully native), installs the ORIGINAL apk, and dumps
-   the decrypted DEX. `rebuild` then publishes the `unpacked-1.17.6`
-   release automatically.
-3. Dispatch **Boot test (unpacked APK)** once. It installs the rebuilt,
-   packer-free build on an arm64 emulator and verifies that the real
-   YouCine UI (SplashAty / MainAty under `com.mobile.brasiltv.*`)
-   reaches `ResumedActivity` with screenshots and logcat as evidence.
-   NOTE: the boot-test workflow must also pass `-accel off` for the same
-   reason.
+| Environment | Verdict |
+|---|---|
+| Linux x86_64 runner + x86_64 AVD | KVM works, but ARM translation breaks SecLLVM and the content gate blocks modified APKs |
+| Linux x86_64 runner + arm64 AVD | launcher-refused: `FATAL: Avd's CPU Architecture 'arm64' is not supported ... on x86_64 host` (even though `qemu-system-aarch64` ships in the package) |
+| macOS runner (Apple Silicon) + arm64 AVD, any accel setting | qemu always initializes HVF; runners have no Hypervisor.framework entitlement (`HVF error: HV_UNSUPPORTED`) - `-accel off` does NOT override this (proven in runs 34063246076 and 34068661659) |
+| macOS runner + arm64 TCG | not available (see above) |
 
-Approximate budget for the two runs: 25-45 min of macOS runner time
-(billed 10x) plus 5 min of Linux time - plan the minutes accordingly, or
-run both jobs on a self-hosted macOS runner (labels:
-`macos-14,arm64`), where minutes are free.
+Two ways to finish the dump, both one command away with the tools in
+this repo:
+
+### Option A - a physical Android phone (the classic; recommended)
+
+Any real ARM Android device (the packer's target platform - everything
+is native and legitimate):
+
+```bash
+# on the phone: enable Developer options + USB debugging, plug it in
+adb devices                                      # confirm it is visible
+adb root 2>/dev/null || true                     # optional; the dumper
+                                                 # only needs root for
+                                                 # /proc/pid/mem reads
+adb install -r -g ycMob_1.17.6_ycsite.apk        # ORIGINAL apk
+adb shell am start -n com.world.youcinemobile/com.mobile.brasiltv.activity.SplashAty
+ADB="adb" python3 unpack/external_memdump.py \
+    --app com.world.youcinemobile \
+    --out-dir dumped/youcine --expect 4 --timeout 600 --settle 3
+python3 unpack/validate_and_extract_dex.py \
+    --dump-dir dumped/youcine --out-dir dexs --min-size 65536
+python3 unpack/rebuild_unpacked_apk.py \
+    --apk ycMob_1.17.6_ycsite.apk --dump-dir dexs \
+    --out youcine-1.17.6-unpacked.apk \
+    --keystore re.keystore --storepass android
+adb install -r -g youcine-1.17.6-unpacked.apk    # the packer-free build
+```
+
+The phone must be rooted for the `/proc/<pid>/mem` reads (or use
+`adb shell su -c ...` - the dumper already falls back to `su`).
+
+### Option B - self-hosted macOS runner
+
+Register a self-hosted runner on your own Mac (Settings -> Actions ->
+Runners; labels `[self-hosted, macOS]`). On real hardware
+Hypervisor.framework works, so the arm64 emulator runs at full speed.
+Then dispatch **Dynamic unpack (emulator)** with the `run_selfhosted`
+input enabled: the `unpack-selfhosted-mac` job boots the arm64 AVD,
+installs the ORIGINAL apk and dumps exactly as above; `rebuild` and
+**Boot test** follow automatically.
+
+After the dump: the `rebuild` job (or the local commands above) produce
+`youcine-1.17.6-unpacked.apk`, and **Boot test (unpacked APK)** verifies
+on an arm64 emulator (self-hosted Mac) that the real
+`com.mobile.brasiltv.*` UI boots with screenshots and logcat evidence.
