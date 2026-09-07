@@ -1,26 +1,39 @@
 #!/usr/bin/env bash
-# nodebug_flow.sh v4 - ORIGINAL apk, spoofed environment, framework restart.
+# nodebug_flow.sh v5 - ORIGINAL apk, spoofed environment, framework restart.
 #
 # Run evidence:
 #   * 34044920876/34048953559/34049784110/34081223822: s.h.e.l.l.N.al
 #     silently refuses to register on the stock debuggable image.
 #   * 34084986538 (playstore/BlackDex): inside the sandbox the packer PASSED
-#     the environment gate and the decrypted app started running - with all
+#     the environment gate and the decrypted app started running - with ALL
 #     qemu signals present - so the gate is NOT qemu: the remaining google_apis
 #     suspects are the JDWP transport (apps debuggable) and the
 #     userdebug/dev-keys build identity.
 #   * 34085315293 (v3): ro.debuggable=0 + ro.secure=0 property-area patch and
 #     the framework restart WORKED (no jdwp connections after restart) but
 #     two self-inflicted failures: patching ro.hardware.egl crash-looped
-#     surfaceflinger ("couldn't find an OpenGL ES implementation") so the
-#     package service never re-registered and the APK never installed
-#     ("Can't find service: package"); and the ':' in fingerprint values
-#     broke the --set spec parser (12 verify failures).
+#     surfaceflinger and the ':' in fingerprint values broke --set parsing.
+#   * 34086236774 (v4): install-before-restart + readiness wait worked, but
+#     the app NEVER LAUNCHED: 'am start' failed with
+#     "Failure calling service activity: Broken pipe (32)" - hiding the qemu
+#     device nodes (chmod 000 + mv) kills system_server within seconds on
+#     this image. Since 34084986538 proves the qemu devices are NOT the gate,
+#     v5 REMOVES all device-node manipulation entirely.
 #
-# v4 fixes: install the APK while the system is still healthy (before the
-# restart), drop the HAL-loaded props from the patch set (ro.hardware.egl,
-# ro.hardware.audio.primary, *vulkan*), '|' spec separator, and a strict
-# post-restart readiness wait on `service check package` + `activity`.
+# v5 changes:
+#   1. NO qemu device-node hiding (fatal + unnecessary).
+#   2. Prop set trimmed to the two gate suspects (debuggable/JDWP +
+#      userdebug/dev-keys identity). Dropped: all qemu.* runtime props
+#      (qemu.hw.mainkeys crash-suspect for the systemui NPE, qemu.sf.* are
+#      surfaceflinger-loaded), init.svc/init.svc_debug_pid.* (rewritten by
+#      init anyway) and the ndk_translation/native-bridge markers - those
+#      are REQUIRED for the armeabi-v7a install to spawn translated
+#      processes; blanking ro.dalvik.vm.isa.arm would break the launch itself
+#      (34084986538 also showed translation markers present while the packer
+#      passed the gate).
+#   3. patch_props.py whole-file fallback now lands the long-value props that
+#      failed in v4 (ro.product.*.model, ro.product/bootimage fingerprint).
+#   4. am start retry loop (system_server needs a moment after the restart).
 set -x
 
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
@@ -54,21 +67,13 @@ echo 'int ijiami_stub_marker;' | gcc -shared -nostdlib -m32 \
 # NOTE: do NOT patch anything a restarted HAL/service reads to LOAD drivers:
 # ro.hardware.egl (surfaceflinger -> EGL loader), ro.hardware.audio.primary
 # (audioserver), *vulkan* (vulkan loader) - v3 crash-looped surfaceflinger.
+# And do NOT blank the native-bridge/ndk_translation markers - the arm app
+# needs them to spawn (see header, v5 change 2).
 SAMSUNG_FP="samsung/o1sxxx/o1s:11/RP1A.200720.012/G991BXXU5CUL5:user/release-keys"
 GOOGLE_FP="google/sdk_gphone_x86_64/generic_x86_64_arm64:11/RSR1.240422.006/12134477:userdebug/dev-keys"
 python3 unpack/patch_props.py \
   --set "ro.debuggable=1|0" \
   --set "ro.secure=1|0" \
-  --set "ro.kernel.qemu=1|0" \
-  --set "ro.kernel.android.qemud=1|0" \
-  --set "init.svc.qemu-props=running|stopped" \
-  --set "qemu.hw.mainkeys=1|0" \
-  --set "qemu.sf.fake_camera=none|" \
-  --set "qemu.sf.lcd_density=160|" \
-  --set "qemu.logcat=start|" \
-  --set "qemu.networknamespace=ready|" \
-  --set "qemu.timezone=Etc/UTC|" \
-  --set "qemu.adb.secure=1|0" \
   --set "ro.build.tags=dev-keys|release-keys" \
   --set "ro.product.build.tags=dev-keys|release-keys" \
   --set "ro.build.type=userdebug|user" \
@@ -83,12 +88,6 @@ python3 unpack/patch_props.py \
   --set "ro.product.vendor.model=sdk_gphone_x86_64|SM-G991B" \
   --set "ro.hardware=ranchu|qcom" \
   --set "ro.boot.hardware=ranchu|qcom" \
-  --set "ro.ndk_translation.version=0.2.2|" \
-  --set "ro.enable.native.bridge.exec=1|0" \
-  --set "ro.dalvik.vm.isa.arm64=x86_64|" \
-  --set "ro.dalvik.vm.isa.arm=x86|" \
-  --set "init.svc_debug_pid.qemu-props=168|" \
-  --set "init.svc_debug_pid.goldfish-logcat=360|" \
   || echo "::warning::some prop patches failed (see output)"
 echo "after patch: ro.debuggable=$(adb shell getprop ro.debuggable 2>/dev/null | tr -d '\r') ro.secure=$(adb shell getprop ro.secure 2>/dev/null | tr -d '\r')"
 adb shell "getprop | grep -iE 'qemu|goldfish|debuggable|secure|tags|fingerprint|type|model|hardware' | head -40" \
@@ -122,25 +121,31 @@ if [ -z "$READY" ]; then
 fi
 adb shell "pm path $APP_ID" || echo APP_GONE_AFTER_RESTART || true
 
-# ---- 3. device-node hiding (early chmod: app opens fail, system safe) -----
-adb shell "for d in /dev/qemu_pipe /dev/goldfish_pipe /dev/goldfish_address_space /dev/goldfish_sync /dev/socket/qemud; do chmod 000 \$d 2>/dev/null && echo chmod-000 \$d; done" || true
-adb shell "ls -la /dev/qemu_pipe /dev/goldfish_pipe /dev/goldfish_address_space /dev/goldfish_sync /dev/socket/qemud 2>/dev/null" | tee work/qemu-devices.txt || true
+# ---- 3. (v5: NO device-node hiding - it kills system_server on this image
+#      and 34084986538 proved the qemu devices are not the gate) -----------
 
 # ---- environment evidence --------------------------------------------------
 adb shell "getprop | grep -iE 'qemu|debug|secure|tags|fingerprint|model|hardware|abilist' | head -40" \
   | tee work/props-evidence.txt || true
 
-# ---- bionic per-dlopen kernel logging (definitive load evidence) ----------
-adb shell "setprop debug.ld.app.$APP_ID dlopen" || true
-adb shell "dmesg -c > /dev/null 2>&1" || true
 adb logcat -c || true
 
-# ---- LATE device rename (existence checks fail; system survives ~55s) ------
-adb shell "for d in /dev/qemu_pipe /dev/goldfish_pipe /dev/goldfish_address_space /dev/goldfish_sync /dev/socket/qemud; do mv \$d \$d.hdn 2>/dev/null && echo hidden \$d; done" || true
-
-# ---- launch ---------------------------------------------------------------
-echo "== launching $APP_ID/$LAUNCH =="
-adb shell am start -W -n "$APP_ID/$LAUNCH" 2>&1 | head -24 || true
+# ---- launch (retry: system_server needs a moment after the restart) -------
+echo "== launching $APP_ID/$LAUNCH (up to 3 attempts) =="
+for i in 1 2 3; do
+  adb shell service check activity 2>/dev/null | tr -d '\r' | grep -q found || sleep 5
+  OUT=$(adb shell am start -W -n "$APP_ID/$LAUNCH" 2>&1 | tr -d '\r')
+  { echo "--- attempt $i ---"; echo "$OUT"; } | head -24 | tee -a work/am-start.txt
+  PID=$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')
+  if [ -n "$PID" ]; then break; fi
+  if echo "$OUT" | grep -qE "Broken pipe|Error type|does not exist|SecurityException|Starting:.*Error"; then
+    echo "launch attempt $i failed; waiting 10s before retry"; sleep 10
+  elif [ -z "$OUT" ]; then
+    echo "launch attempt $i produced no output (adb dead?); retrying"; sleep 10
+  else
+    break
+  fi
+done
 sleep 15
 PID=$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')
 echo "pid after 15s: '$PID'"

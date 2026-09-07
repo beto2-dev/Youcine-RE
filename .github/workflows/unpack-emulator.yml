@@ -2,16 +2,27 @@ name: Dynamic unpack (emulator)
 
 # Youcine-RE - iJiami unpack.
 #
-# PRIMARY (unpack-nodebug): the ORIGINAL apk on the google_apis x86_64 image
-# booted with `-prop ro.debuggable=0 -prop ro.secure=0`. Run evidence
-# (34044920876 / 34048953559 / 34049784110): on the stock debuggable image
-# every app runs with JDWP open and s.h.e.l.l.N.al silently refuses to
-# register (no linker error, no kill). Boot-time props remove the app
-# debuggable flag while keeping adbd root (ro.secure=0) for the
-# out-of-process /proc/<pid>/mem sweep. The apk is installed with
-# --abi armeabi-v7a so the stub extracts ijm_lib/x86 (NATIVE x86 SecLLVM).
+# PRIMARY (unpack-nodebug): the ORIGINAL apk on the google_apis x86_64 image.
+# Run evidence (34044920876 / 34048953559 / 34049784110): on the stock
+# debuggable image every app runs with JDWP open and s.h.e.l.l.N.al
+# silently refuses to register (no linker error, no kill). nodebug v5:
+# runtime property-area patching (ro.debuggable=0, user/release-keys
+# Samsung identity) + framework restart while adbd stays root for the
+# out-of-process /proc/<pid>/mem sweep; NO qemu device-node hiding
+# (that killed system_server -> 'am start' Broken pipe in 34086236774,
+# and 34084986538 proved the qemu signals are not the gate). The apk is
+# installed with --abi armeabi-v7a so the stub extracts ijm_lib/x86.
 #
-# SECONDARY (unpack-playstore): BlackDex (GPL-3.0, CodingGay) on the
+# SECONDARY (unpack-redroid): NATIVE arm64 Android 11 in a redroid
+# container on GitHub's free ubuntu-24.04-arm runners. The x86_64 emulator
+# runs the packed arm app under ndk_translation and the SecLLVM payload
+# dies in mixed translated/native execution (run 34084986538); redroid
+# executes the arm64-v8a libexec.so on REAL hardware. No qemu/goldfish
+# surface at all; build.prop is patched BEFORE first boot (docker create
+# -> docker cp -> docker start) with ro.debuggable=0, user/release-keys
+# Samsung identity; adbd stays root for the /proc/<pid>/mem sweep.
+#
+# TERTIARY (unpack-playstore): BlackDex (GPL-3.0, CodingGay) on the
 # production google_apis_playstore image (ro.debuggable=0, no su, no root
 # needed). BlackDex installs the target from its REAL sourceDir
 # (byte-identical original apk: content + signature gates pass) and dumps
@@ -51,7 +62,12 @@ on:
         default: true
         type: boolean
       skip_playstore:
-        description: 'skip the BlackDex playstore job (for fast nodebug iterations)'
+        description: 'skip the BlackDex playstore job (for fast iterations)'
+        required: false
+        default: true
+        type: boolean
+      skip_redroid:
+        description: 'skip the native-arm64 redroid job'
         required: false
         default: false
         type: boolean
@@ -162,9 +178,8 @@ jobs:
             work/dmesg-linker.txt
             work/props-evidence.txt
             work/props-after.txt
-            work/qemu-devices.txt
-            work/public-libraries.txt
             work/abi-info.txt
+            work/am-start.txt
             work/ps-after.txt
             work/maps-app.txt
             work/packed.apk
@@ -172,8 +187,90 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  unpack-redroid:
+    # SECONDARY: native arm64 Android 11 in a redroid container - no
+    # ndk_translation, no qemu surface, real-hardware SecLLVM execution.
+    if: ${{ !inputs.skip_redroid }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 55
+    outputs:
+      dex_count: ${{ steps.count_rd.outputs.dex_count }}
+    env:
+      APP_ID: com.world.youcinemobile
+      LAUNCH: com.mobile.brasiltv.activity.SplashAty
+      EXPECT_DEX: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # NOTE: no setup-android here - Google's platform-tools zip is
+      # x86_64-only. Ubuntu's adb is built natively for arm64.
+      - name: adb + docker (host deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y adb
+          adb version
+          docker version
+
+      - name: Fetch packed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p work dumped/youcine count
+          if [ "${{ github.event.inputs.apk_source }}" = "release" ]; then
+            gh release download "${{ github.event.inputs.release_tag }}" \
+              -R "${{ github.repository }}" \
+              -p "${{ github.event.inputs.release_asset }}" \
+              -O work/packed.apk
+          else
+            curl -fL --retry 3 -o work/packed.apk "${{ secrets.SAMPLE_URL }}"
+          fi
+          sha256sum work/packed.apk | tee work/apk.sha256
+
+      - name: Run redroid flow (native arm64 Android 11)
+        run: bash unpack/redroid_flow.sh || true
+
+      - name: Collect output
+        id: count_rd
+        if: always()
+        run: |
+          val=$(cat count/dex_count 2>/dev/null || echo 0)
+          echo "dex_count=${val:-0}" >> "$GITHUB_OUTPUT"
+          echo "redroid dex dumps: ${val:-0}"
+
+      - name: Gate (fail job when no dumps)
+        if: always() && steps.count_rd.outputs.dex_count == '0'
+        run: |
+          echo '::error::redroid run produced 0 DEX (see dumps-redroid artifact: logcat + docker logs + am-start + maps evidence).'
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-redroid
+          # NOTE: work/redroid-data is deliberately EXCLUDED (root-owned
+          # Android data partition, huge and not needed as evidence).
+          path: |
+            dumped/
+            count/
+            work/logcat-redroid.txt
+            work/docker-redroid.txt
+            work/am-start-redroid.txt
+            work/ps-after-redroid.txt
+            work/maps-app-redroid.txt
+            work/dmesg-redroid.txt
+            work/system-build.prop
+            work/vendor-build.prop
+            work/packed.apk
+            work/apk.sha256
+          if-no-files-found: warn
+          retention-days: 7
+
   unpack-playstore:
-    # SECONDARY: BlackDex sandbox on the production image (no root needed).
+    # TERTIARY: BlackDex sandbox on the production image (no root needed).
     if: ${{ !inputs.skip_playstore }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -539,8 +636,8 @@ jobs:
           retention-days: 7
 
   rebuild:
-    needs: [unpack-nodebug, unpack-playstore, unpack-x86, unpack-selfhosted-mac]
-    if: always() && (needs.unpack-nodebug.outputs.dex_count > 0 || needs.unpack-playstore.outputs.dex_count > 0 || needs.unpack-x86.outputs.dex_count > 0 || needs.unpack-selfhosted-mac.outputs.dex_count > 0)
+    needs: [unpack-nodebug, unpack-redroid, unpack-playstore, unpack-x86, unpack-selfhosted-mac]
+    if: always() && (needs.unpack-nodebug.outputs.dex_count > 0 || needs.unpack-redroid.outputs.dex_count > 0 || needs.unpack-playstore.outputs.dex_count > 0 || needs.unpack-x86.outputs.dex_count > 0 || needs.unpack-selfhosted-mac.outputs.dex_count > 0)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

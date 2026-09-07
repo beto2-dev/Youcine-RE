@@ -32,6 +32,16 @@ import tempfile
 
 PROP_DIR = "/dev/__properties__"
 WINDOW = 120  # search +/- this many bytes around the name for the value
+# serialized prop_area files keep LONG values (> ~91 bytes, e.g. build
+# fingerprints) in a separate long-value storage at the END of the file, far
+# from the prop_info entry: for those the window search fails. Values >=
+# WHOLE_FILE_MIN bytes are unique enough to be searched (and patched) across
+# the WHOLE file. Short values ('1', 'running', 'user') stay window-only -
+# a whole-file replace would corrupt unrelated entries (service states!).
+WHOLE_FILE_MIN = 8
+PROP_VALUE_MAX = 92  # classic prop entry value area (empirical: v4 run
+                     # safely wrote userdebug over user, release-keys over
+                     # dev-keys and the framework restarted cleanly)
 
 
 def sh(adb: list, cmd: str, timeout: float = 30.0):
@@ -55,11 +65,12 @@ def find_name_offset(data: bytes, name: str) -> int:
     return data.find(pat)
 
 
-def find_value_offset(data: bytes, name_off: int, old: str) -> int:
-    """Closest NUL-terminated occurrence of `old` within +/-WINDOW of name."""
+def find_value_offsets(data: bytes, name_off: int, old: str) -> list:
+    """[(offset, in_window)] NUL-terminated occurrences of `old`:
+    window-first (closest to name), whole-file (all occurrences) fallback
+    for long/unique values."""
     want = old.encode() + b"\x00"
-    best = -1
-    best_d = 1 << 30
+    hits = []
     start = max(0, name_off - WINDOW)
     end = min(len(data), name_off + WINDOW)
     i = start
@@ -67,11 +78,21 @@ def find_value_offset(data: bytes, name_off: int, old: str) -> int:
         j = data.find(want, i, end)
         if j == -1:
             break
-        d = abs(j - name_off)
-        if d < best_d:
-            best_d, best = d, j
+        hits.append((j, True))
         i = j + 1
-    return best
+    if hits:
+        hits.sort(key=lambda t: abs(t[0] - name_off))
+        return hits
+    if len(old) < WHOLE_FILE_MIN:
+        return []
+    i = 0
+    while True:
+        j = data.find(want, i)
+        if j == -1:
+            break
+        hits.append((j, False))
+        i = j + 1
+    return hits
 
 
 def patch_local(local: str, sets: list, name: str) -> int:
@@ -83,15 +104,39 @@ def patch_local(local: str, sets: list, name: str) -> int:
         noff = find_name_offset(data, prop)
         if noff == -1:
             continue
-        voff = find_value_offset(data, noff, old)
-        if voff == -1:
+        voffs = find_value_offsets(data, noff, old)
+        if not voffs:
             print(f"[!] {prop}: name found @{noff:#x} but old value "
-                  f"{old!r} not found in window; skipped", flush=True)
+                  f"{old!r} not found (window{'+whole-file' if len(old) >= WHOLE_FILE_MIN else ''}); skipped",
+                  flush=True)
             continue
         newb = new.encode() + b"\x00"
-        data[voff:voff + len(newb)] = newb
-        print(f"[+] {prop}: {old!r} -> {new!r} (name@{noff:#x} "
-              f"value@{voff:#x} in {os.path.basename(local)})", flush=True)
+        oldb = old.encode() + b"\x00"
+        # window hits live in the classic 92-byte value area of a prop entry
+        # (v4 evidence: grown values verified + clean framework restart);
+        # whole-file hits live in the packed long-value storage where any
+        # growth would clobber the next stored string - shrink-only there.
+        window_hits = [o for o, w in voffs if w]
+        file_hits = [o for o, w in voffs if not w]
+        if file_hits and len(newb) > len(oldb):
+            print(f"[!] {prop}: new value {new!r} longer than long-storage "
+                  f"slot {old!r}; skipping long-storage slots", flush=True)
+            file_hits = []
+        if not window_hits and not file_hits:
+            continue
+        for voff in window_hits + file_hits:
+            if len(newb) > PROP_VALUE_MAX:
+                print(f"[!] {prop}: new value exceeds PROP_VALUE_MAX; "
+                      f"skipped", flush=True)
+                continue
+            data[voff:voff + len(newb)] = newb
+            # zero-fill the tail of the old slot so no stale bytes survive
+            if len(newb) < len(oldb):
+                data[voff + len(newb):voff + len(oldb)] = \
+                    b"\x00" * (len(oldb) - len(newb))
+        print(f"[+] {prop}: {old!r} -> {new!r} "
+              f"({len(window_hits)}w+{len(file_hits)}f slot(s)) "
+              f"(name@{noff:#x} in {os.path.basename(local)})", flush=True)
         patched += 1
     if patched:
         with open(local, "wb") as fh:
@@ -186,10 +231,11 @@ def prop_done(spec, local: str) -> bool:
     noff = find_name_offset(data, prop)
     if noff == -1:
         return False
-    voff = find_value_offset(data, noff, old)
-    if voff == -1:
+    voffs = find_value_offsets(data, noff, old)
+    if not voffs:
         return True  # old value gone: already patched
-    return data[voff:voff + len(new) + 1] == new.encode() + b"\x00"
+    o = voffs[0][0]
+    return data[o:o + len(new) + 1] == new.encode() + b"\x00"
 
 
 if __name__ == "__main__":
