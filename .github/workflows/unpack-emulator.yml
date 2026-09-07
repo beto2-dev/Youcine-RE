@@ -50,6 +50,11 @@ on:
         required: false
         default: true
         type: boolean
+      skip_playstore:
+        description: 'skip the BlackDex playstore job (for fast nodebug iterations)'
+        required: false
+        default: false
+        type: boolean
       run_selfhosted:
         description: 'run the self-hosted macOS job (requires your own runner)'
         required: false
@@ -169,6 +174,7 @@ jobs:
 
   unpack-playstore:
     # SECONDARY: BlackDex sandbox on the production image (no root needed).
+    if: ${{ !inputs.skip_playstore }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     outputs:
