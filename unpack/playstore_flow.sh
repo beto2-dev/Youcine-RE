@@ -54,7 +54,7 @@ adb shell "dumpsys package $TARGET | grep -iE 'primaryCpuAbi' | head -2" \
 adb shell "dumpsys package $BD32_PKG | grep -iE 'primaryCpuAbi' | head -2" \
   | tee work/bd32-abi.txt || true
 
-adb logcat -c || true
+timeout 30 adb logcat -c || true
 
 # ---- drive BlackDex32 (uiautomator row tap + dialog handling) --------------
 python3 unpack/blackdex_auto.py \
@@ -78,7 +78,7 @@ if [ "$have_fix" -eq 0 ] && [ "$have_big" -eq 0 ]; then
     --timeout 300 || true
 fi
 
-adb logcat -d -b main,system,crash > work/logcat-playstore.txt 2>/dev/null || true
+timeout 90 adb logcat -d -b main,system,crash > work/logcat-playstore.txt 2>/dev/null || true
 echo "== BlackDex sandbox evidence =="
 grep -nE "youcine|blackdex|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|FATAL|DexDump|cookieDump" \
   work/logcat-playstore.txt | head -40 || true
