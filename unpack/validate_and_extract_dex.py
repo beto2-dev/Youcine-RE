@@ -18,6 +18,13 @@ def is_dex(data: bytes) -> bool:
     return size == len(data) and 0x70 <= size <= 80_000_000
 
 
+def is_cdex(data: bytes) -> bool:
+    """CompactDex blob (ART in-memory representation). Not directly
+    loadable - kept for offline cdex->dex conversion in the rebuild flow."""
+    return (len(data) >= 0x38 and data.startswith(b"cdex")
+            and data[4:7].isdigit())
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump-dir", required=True)
@@ -33,6 +40,7 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     blobs = []
+    cdex_files = []
     for p in sorted(dump_dir.glob("*")):
         if not p.is_file():
             continue
@@ -40,15 +48,20 @@ def main() -> int:
         if is_dex(data) and len(data) >= args.min_size:
             blobs.append(data)
             continue
-        # maybe a raw region containing one dex at offset 0 already sliced
+        if is_cdex(data) and len(data) >= args.min_size:
+            cdex_files.append((p, data))
     # de-dupe by sha256, keep largest unique
     uniq = {}
     for b in blobs:
         uniq[hashlib.sha256(b).hexdigest()] = b
     ordered = sorted(uniq.values(), key=lambda x: -len(x))
+    for p, data in cdex_files:
+        (out_dir / ("compact_" + p.name)).write_bytes(data)
+        print(f"[e] {p.name}: compact-dex blob {len(data)} bytes -> "
+              f"compact_{p.name} (needs cdex->dex conversion)", flush=True)
     if not ordered:
-        print("[!] no valid DEX in dump dir", flush=True)
-        return 1
+        print("[!] no valid standard DEX in dump dir", flush=True)
+        return 0 if cdex_files else 1
     for i, b in enumerate(ordered):
         name = "classes.dex" if i == 0 else f"classes{i + 1}.dex"
         (out_dir / name).write_bytes(b)

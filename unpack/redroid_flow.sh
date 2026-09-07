@@ -333,6 +333,29 @@ fix_prop ro.product.vendor.model "SM-G991B"
 fix_prop ro.product.brand samsung
 fix_prop ro.product.device o1s
 fix_prop ro.product.name o1sxxx
+# ---------------------------------------------------------------------------
+# 5a. ESTABLISH adbd ROOT FIRST (R32 lesson: the runtime prop patch and the
+#     framework restart ran as the shell user - 'no files under
+#     /dev/__properties__' + 'Must be root' - so ro.debuggable stayed 1 and
+#     the app launched with JDWP open. patch_props.py, stop/start and the
+#     /proc/<pid>/mem sweep ALL need root.)
+# ---------------------------------------------------------------------------
+ID=$(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r')
+echo "adb shell id: $ID"
+if ! echo "$ID" | grep -q "uid=0"; then
+  echo "::warning::adbd not root yet; trying adb root + reconnect"
+  adb -s "$DEV" root >/dev/null 2>&1 || true
+  sleep 3
+  adb disconnect >/dev/null 2>&1 || true
+  adb connect "$DEV" >/dev/null 2>&1 || true
+  sleep 2
+  ID=$(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r')
+  echo "adb shell id (after adb root + reconnect): $ID"
+fi
+echo "$ID" | grep -q "uid=0" || echo "::warning::adb is NOT root - property patch, framework restart and /proc/<pid>/mem sweep will all fail"
+# verify the property area is actually visible to root
+adb -s "$DEV" shell ls /dev/__properties__ | head -6 | tee work/prop-files.txt || true
+
 fix_prop ro.product.manufacturer samsung
 fix_prop ro.hardware qcom
 fix_prop ro.boot.hardware qcom
@@ -354,6 +377,11 @@ if [ ${#SET_ARGS[@]} -gt 0 ]; then
   done
   echo "framework restarted: ready=$RDY ro.debuggable=$(rd_cur ro.debuggable) ro.build.tags=$(rd_cur ro.build.tags) ro.product.model=$(rd_cur ro.product.model)"
   [ -n "$RDY" ] || echo "::warning::framework not fully ready after restart; proceeding"
+  # wait for package manager to re-register fully (APK install needs it)
+  for i in $(seq 1 20); do
+    adb -s "$DEV" shell pm path com.android.shell >/dev/null 2>&1 && break
+    sleep 3
+  done
   # refresh evidence after the fix
   adb -s "$DEV" shell "getprop | grep -iE 'qemu|goldfish|ranchu|redroid|debuggable|secure|fingerprint|model|hardware|abilist|tags|build.type' | head -50" \
     | tee work/props-redroid-after.txt || true
@@ -361,22 +389,14 @@ else
   echo "== build.prop patch took effect: no runtime patching needed =="
 fi
 
-# adbd must be root for the /proc/<pid>/mem sweep (ro.secure=0 should do it)
-ID=$(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r')
-echo "adb shell id: $ID"
-if ! echo "$ID" | grep -q "uid=0"; then
-  echo "::warning::adbd not root yet; trying adb root + reconnect"
-  adb -s "$DEV" root >/dev/null 2>&1 || true
-  sleep 3
-  adb disconnect >/dev/null 2>&1 || true
-  adb connect "$DEV" >/dev/null 2>&1 || true
-  sleep 2
-  ID=$(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r')
-  echo "adb shell id (after adb root + reconnect): $ID"
-fi
-echo "$ID" | grep -q "uid=0" || echo "::warning::adb is NOT root - /proc/<pid>/mem sweep will likely fail"
+# framework restart can disturb the adb tcp connection - re-establish
+adb disconnect >/dev/null 2>&1 || true
+sleep 2
+adb connect "$DEV" >/dev/null 2>&1 || true
+sleep 2
 adb -s "$DEV" shell setenforce 0 >/dev/null 2>&1 || true
 echo "SELinux: $(adb -s "$DEV" shell getenforce 2>/dev/null | tr -d '\r')"
+echo "adb identity after restart: $(adb -s "$DEV" shell id 2>/dev/null | tr -d '\r' | head -1)"
 
 # ---------------------------------------------------------------------------
 # 5. install the ORIGINAL packed apk (byte-identical: no tamper trip)
@@ -461,7 +481,7 @@ fi
 # ---------------------------------------------------------------------------
 ls -la dumped/youcine || true
 n=0
-for f in dumped/youcine/dex_*.bin; do
+for f in dumped/youcine/dex_*.bin dumped/youcine/*.cdex; do
   [ -f "$f" ] || continue
   sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
   [ "$sz" -ge 65536 ] && n=$((n+1))
@@ -478,7 +498,7 @@ echo "   image     : $REDROID_IMAGE (native arm64)"
 echo "   container : $CNAME -> $(docker ps --filter name=$CNAME --format '{{.Status}}' 2>/dev/null || echo 'not running')"
 echo "   binder    : $(ls /dev/binder* 2>/dev/null | tr '\n' ' ')"
 echo "   dex_count : $n  (unique DEX >= 64 KiB in dumped/youcine)"
-echo "   raw dumps : $(ls dumped/youcine/dex_*.bin 2>/dev/null | wc -l) file(s)"
+echo "   raw dumps : $(ls dumped/youcine/dex_*.bin dumped/youcine/*.cdex 2>/dev/null | wc -l) file(s)"
 echo "   evidence  : work/logcat-redroid.txt work/docker-redroid.txt work/props-redroid.txt"
 echo "               work/abi-info-redroid.txt work/ps-after-redroid.txt work/maps-app-redroid.txt"
 echo "               work/dmesg-redroid.txt work/dmesg-host.txt work/am-start-redroid.txt"

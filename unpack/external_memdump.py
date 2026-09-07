@@ -38,6 +38,12 @@ import time
 from pathlib import Path
 
 DEX_MAGIC = b"dex\n"
+# ART keeps in-memory dex as CompactDex (magic "cdex0011") when the class
+# data has been dequickened - run 34122336734 (redroid): the app ran real
+# code (activities displayed, app native libs loaded) but 8 memory sweeps
+# found ZERO b"dex\n" - the decrypted classes live on as compact dex.
+CDEX_MAGIC = b"cdex"
+VDEX_MAGIC = b"vdex"
 MAX_REGION = 96_000_000
 MIN_REGION = 0x10000
 
@@ -196,7 +202,76 @@ def extract_dex(blob: bytes) -> list[bytes]:
     return found
 
 
-def sweep_local(files: list[Path], out_dir: Path, seen: dict[str, bytes]) -> int:
+def _cdex_size(blob: bytes, i: int) -> int | None:
+    """Best-effort total size of the compact dex starting at i.
+
+    CompactDex::Header layout is not fully documented: try file_size at the
+    standard-dex offset 0x20 and fall back to the map_off at 0x34. Both are
+    validated against sanity ranges; on failure the caller caps the blob.
+    """
+    if i + 0x38 > len(blob):
+        return None
+    fsize = int.from_bytes(blob[i + 0x20 : i + 0x24], "little")
+    map_off = int.from_bytes(blob[i + 0x34 : i + 0x38], "little")
+    if 0x70 <= fsize <= 80_000_000 and i + fsize <= len(blob):
+        return fsize
+    if 0x28 <= map_off <= len(blob) - i:
+        # map list lives at the end: map_off + 24*entries + 12 is close to
+        # the total size; use it only when file_size is unusable
+        return None
+    return None
+
+
+def extract_cdex(blob: bytes, out_prefix: str, out_dir: Path,
+                 seen_cdx: set[str]) -> int:
+    """Capture compact-dex blobs: whole-bounded regions around the magic.
+
+    A trailing region of up to 16 MiB (or up to the next cdex magic) is
+    captured as cdexraw evidence; the rebuild stage converts/trims offline.
+    Returns number of new files written."""
+    written = 0
+    idx = 0
+    positions: list[int] = []
+    while True:
+        i = blob.find(CDEX_MAGIC, idx)
+        if i < 0:
+            break
+        if i + 8 <= len(blob) and blob[i + 4 : i + 7].isdigit() and blob[i + 8 - 1 : i + 8] == b"\x00":
+            positions.append(i)
+        idx = i + 4
+    for i in positions:
+        size = _cdex_size(blob, i)
+        if size is None:
+            # cap: next magic or 16 MiB
+            nxt = min([p for p in positions if p > i] + [i + 16 * 1024 * 1024, len(blob)])
+            size = nxt - i
+        chunk = blob[i : i + size]
+        digest = hashlib.sha256(chunk).hexdigest()
+        if digest in seen_cdx:
+            continue
+        seen_cdx.add(digest)
+        (out_dir / f"{out_prefix}_{len(seen_cdx):02d}_{digest[:12]}.cdex").write_bytes(chunk)
+        print(f"[+] cdex blob {size} bytes @+{i}", flush=True)
+        written += 1
+    return written
+
+
+def diagnose_magics(files: list[Path]) -> dict[str, int]:
+    """Count raw magic occurrences in the pulled regions (debug evidence)."""
+    counts = {"dex\n": 0, "cdex": 0, "vdex": 0}
+    for p in files:
+        try:
+            blob = p.read_bytes()
+        except OSError:
+            continue
+        counts["dex\n"] += blob.count(DEX_MAGIC)
+        counts["cdex"] += blob.count(CDEX_MAGIC)
+        counts["vdex"] += blob.count(VDEX_MAGIC)
+    return counts
+
+
+def sweep_local(files: list[Path], out_dir: Path, seen: dict[str, bytes],
+                seen_cdx: set[str]) -> int:
     added = 0
     for p in files:
         try:
@@ -214,7 +289,27 @@ def sweep_local(files: list[Path], out_dir: Path, seen: dict[str, bytes]) -> int
             (out_dir / name).write_bytes(dex)
             print(f"[+] {name} {len(dex)} bytes", flush=True)
             added += 1
+        added += extract_cdex(blob, "cdex", out_dir, seen_cdx)
     return added
+
+
+def save_magic_regions(files: list[Path], out_dir: Path, limit: int = 6) -> None:
+    """Preserve raw regions that contain any dex/cdex magic (evidence)."""
+    kept = 0
+    for p in files:
+        if kept >= limit:
+            break
+        try:
+            blob = p.read_bytes()
+        except OSError:
+            continue
+        if DEX_MAGIC in blob or (CDEX_MAGIC + b"00") in blob or VDEX_MAGIC in blob:
+            name = out_dir / f"region_{p.name}"
+            if not name.exists():
+                name.write_bytes(blob[: 32 * 1024 * 1024])
+                print(f"[e] kept {name.name} ({len(blob)} bytes, has dex/cdex magic)",
+                      flush=True)
+                kept += 1
 
 
 def snapshot_maps(pid: int, out_dir: Path) -> None:
@@ -241,7 +336,8 @@ def pull_app_data(app: str, out_dir: Path) -> None:
     try:
         with tarfile.open(tar_path, "r") as tf:
             names = tf.getnames()
-            interesting = [n for n in names if not n.endswith(".so") and tf.getmember(n).size() > 0x4000]
+            interesting = [n for n in names if not n.endswith(".so")
+                           and tf.getmember(n).size > 0x4000]
             for n in interesting[:40]:
                 print(f"    data: {n}", flush=True)
     except (tarfile.TarError, OSError):
@@ -271,6 +367,7 @@ def main() -> int:
     push_sweep_script()
 
     seen: dict[str, bytes] = {}
+    seen_cdx: set[str] = set()
     deadline = time.time() + args.timeout
     start = time.time()
     pid_seen_once = False
@@ -301,7 +398,11 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="yc_sweep_") as td:
             files = batch_sweep(pid, Path(td))
             print(f"[*] pulled {len(files)} region files", flush=True)
-            added = sweep_local(files, out_dir, seen)
+            mag = diagnose_magics(files)
+            print(f"[*] magic occurrences: dex\n={mag['dex\n']} cdex={mag['cdex']} "
+                  f"vdex={mag['vdex']}", flush=True)
+            save_magic_regions(files, out_dir)
+            added = sweep_local(files, out_dir, seen, seen_cdx)
         if len(seen) >= args.expect:
             print(f"[*] reached expect={args.expect}; done", flush=True)
             kill_proc(pid)
@@ -319,11 +420,14 @@ def main() -> int:
 
     (out_dir / "dex_count.txt").write_text(f"{len(seen)}\n")
     if args.pull_app_data and pid_seen_once:
-        pull_app_data(args.app, out_dir)
-    print(f"[*] unique DEX captured: {len(seen)}", flush=True)
+        try:
+            pull_app_data(args.app, out_dir)
+        except Exception as exc:  # noqa: BLE001 - evidence over crash
+            print(f"[!] pull_app_data failed: {exc}", flush=True)
+    print(f"[*] unique DEX captured: {len(seen)} (cdex blobs: {len(seen_cdx)})", flush=True)
     for digest, dex in seen.items():
         print(f"    {len(dex):>10}  {digest}", flush=True)
-    return 0 if seen else 1
+    return 0 if seen or seen_cdx else 1
 
 
 if __name__ == "__main__":

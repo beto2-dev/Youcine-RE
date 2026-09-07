@@ -177,7 +177,7 @@ fi
 # ---- count (min-size filter drops the 13.6 KB packer stub dex) ------------
 ls -la dumped/youcine || true
 n=0
-for f in dumped/youcine/dex_*.bin; do
+for f in dumped/youcine/dex_*.bin dumped/youcine/*.cdex; do
   [ -f "$f" ] || continue
   sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
   [ "$sz" -ge 65536 ] && n=$((n+1))
