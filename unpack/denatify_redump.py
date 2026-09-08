@@ -69,12 +69,34 @@ KEEP_PREFIXES = (
     "Lcom/hpplay/component/protocol/encrypt/ED25519Encode",  # covers ...Encrypt and ...Encrypt2
 )
 
+# GUARD: wrap the <clinit> of these classes in a try/catch so a loadLibrary
+# failure (SDK kill-switch: the lib's JNI_OnLoad validates the signing
+# certificate and returns JNI_ERR on the re-signed research build) kills the
+# CLASS init gracefully instead of the PROCESS.  Boot-test 34281060343:
+# com.titan.ranger.NativeJni.<clinit> -> System.loadLibrary("ranger-jni") ->
+# UnsatisfiedLinkError: JNI_ERR returned from JNI_OnLoad in libranger-jni.so
+# -> FATAL EXCEPTION on the handlerTitan thread.
+GUARD_CLASSES = (
+    "Lcom/titan/ranger/NativeJni;",
+)
+
 METHOD_RE = re.compile(r"^\.method\s+(.*?)\s+([A-Za-z_$<>0-9_]+)\((.*?)\)(\S+)\s*$")
 CLASS_RE = re.compile(r"^\.class\s+.*?(L[^;]+;)")
 
 
-def default_body_smali(proto_ret: str) -> tuple[int, str]:
-    """(locals_count, smali body lines) for a synthesized default return."""
+def default_body_smali(proto_ret: str, name: str = "") -> tuple[int, str]:
+    """(locals_count, smali body lines) for a synthesized default return.
+
+    Constructors are special: the Dalvik verifier REQUIRES every <init> to
+    call a superclass constructor before returning (boot-test 34281060343:
+    'da.w.<init>(String) failed to verify: Constructor returning without
+    calling superclass constructor').  invoke-direct on Object.<init> is
+    verifier-legal from ANY class (Object is a superclass of everything),
+    so the guarded stub boots even when the real super chain is unknown.
+    """
+    if name == "<init>":
+        return 0, ("    invoke-direct {p0}, Ljava/lang/Object;-><init>()V\n"
+                   "\n    return-void\n")
     if proto_ret == "V":
         return 0, "    return-void\n"
     if proto_ret in ("Z", "I", "B", "S", "C", "F"):
@@ -148,6 +170,7 @@ def patch_smali_file(path: Path, bodies: dict, report: dict) -> None:
     lines = text.split("\n")
     cls_m = CLASS_RE.search(text)
     cls_desc = cls_m.group(1) if cls_m else "L?;"
+    guarded = cls_desc in GUARD_CLASSES
     out: list[str] = []
     i = 0
     n = len(lines)
@@ -166,10 +189,26 @@ def patch_smali_file(path: Path, bodies: dict, report: dict) -> None:
             block.append(lines[j])
             j += 1
         end_line = lines[j] if j < n else ".end method"
-        if m and " native " in header + " ":
+        if m and (" native " in header + " " or
+                  (guarded and m.group(2) == "<clinit>")):
             flags, name, params, ret = m.group(1), m.group(2), m.group(3), m.group(4)
             key = f"{cls_desc}|{name}|({params}){ret}"
-            if any(cls_desc.startswith(p) for p in KEEP_PREFIXES):
+            if guarded and name == "<clinit>":
+                # GUARD: keep the original class-init body but make a
+                # loadLibrary failure (SDK signature gate in JNI_OnLoad)
+                # non-fatal - the (de-natified) siblings degrade to stubs
+                # instead of killing the process at class-init time.
+                out.append(header)
+                out.append("    :try_start_0")
+                out.extend(block)
+                out.append("    :try_end_0")
+                out.append("    .catch Ljava/lang/UnsatisfiedLinkError; "
+                           "{:try_start_0 .. :try_end_0} :catch_0")
+                out.append("    :catch_0")
+                out.append("    return-void")
+                out.append(end_line)
+                report["guard"].append(key)
+            elif any(cls_desc.startswith(p) for p in KEEP_PREFIXES):
                 # KEEP - leave the native declaration untouched
                 report["keep"].append(key)
                 out.append(header)
@@ -186,7 +225,7 @@ def patch_smali_file(path: Path, bodies: dict, report: dict) -> None:
                 out.append(end_line)
                 report["real"].append(key)
             else:
-                locals_n, body = default_body_smali(ret)
+                locals_n, body = default_body_smali(ret, name)
                 new_header = header.replace(" native ", " ", 1)
                 if new_header == header:
                     new_header = re.sub(r"\bnative\b\s*", "", header, count=1)
@@ -267,7 +306,8 @@ def main() -> int:
     for dex in dexes:
         print(f"[*] de-natifying {dex.name} ({dex.stat().st_size:,} B)", flush=True)
         cls_pre, m_pre, n_pre = parse_dex_headers(dex)
-        report = {"dex": dex.name, "real": [], "stub": [], "keep": []}
+        report = {"dex": dex.name, "real": [], "stub": [],
+                  "keep": [], "guard": []}
         with tempfile.TemporaryDirectory(prefix="denatify_") as td:
             workdir = Path(td)
             decoded = apktool_decode_dex(apktool, dex, workdir / "decoded", workdir)
@@ -277,8 +317,9 @@ def main() -> int:
                 txt = smali.read_text(encoding="utf-8")
                 if "\n.method " not in txt and not txt.startswith(".method "):
                     continue
-                if " native " not in txt and not re.search(
-                        r"^\.method[^\n]*\bnative\b", txt, re.M):
+                if (" native " not in txt and not re.search(
+                        r"^\.method[^\n]*\bnative\b", txt, re.M)
+                        and not any(g in txt for g in GUARD_CLASSES)):
                     continue
                 patch_smali_file(smali, bodies, report)
                 count += 1
@@ -295,10 +336,12 @@ def main() -> int:
             "real": len(report["real"]),
             "stub": len(report["stub"]),
             "keep": len(report["keep"]),
+            "guard": len(report["guard"]),
         }
         full_report["dexes"].append(entry)
         print(f"    real={entry['real']} stub={entry['stub']} "
-              f"keep={entry['keep']} natives {n_pre} -> {n_post}", flush=True)
+              f"keep={entry['keep']} guard={entry['guard']} "
+              f"natives {n_pre} -> {n_post}", flush=True)
         # hard verification
         if cls_pre != cls_post or m_pre != m_post:
             failures.append(f"{dex.name}: class/method count changed "
@@ -315,6 +358,7 @@ def main() -> int:
         "real": sum(d["real"] for d in full_report["dexes"]),
         "stub": sum(d["stub"] for d in full_report["dexes"]),
         "keep": sum(d["keep"] for d in full_report["dexes"]),
+        "guard": sum(d["guard"] for d in full_report["dexes"]),
     }
     (out_dir / "denatify_report.json").write_text(
         json.dumps(full_report, indent=2) + "\n", encoding="utf-8")
@@ -326,7 +370,8 @@ def main() -> int:
         return 1
     t = full_report["totals"]
     print(f"[+] de-natify OK: real={t['real']} stubbed={t['stub']} "
-          f"kept-native={t['keep']} -> {out_dir}", flush=True)
+          f"kept-native={t['keep']} guarded-clinit={t['guard']} "
+          f"-> {out_dir}", flush=True)
     return 0
 
 
