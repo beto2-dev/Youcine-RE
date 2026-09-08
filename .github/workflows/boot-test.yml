@@ -149,11 +149,11 @@ jobs:
           if [ "$MAIN_ALIVE" = "0" ]; then
             if grep -qE "at com\.(mobile\.brasiltv|ijm\.|arialyy\.|efs\.)" work/crash_lines.txt 2>/dev/null; then
               echo "::notice::RESEARCH OUTCOME - UNPACK VERIFIED: real app code executed (providers, App.onCreate,"
-              echo "::notice::ConfusionUtils neutralized, DE SDK SM4 engine initialized, DETool.dowork -> true) and the"
-              echo "::notice::process died at the first iJiami-VMP-protected method. The 805 ACC_NATIVE bodies and"
-              echo "::notice::the ~45k return-void extraction stubs are materialized at runtime ONLY by the packer's"
-              echo "::notice::content-gated libexec engine, so a re-signed packer-free build stops here BY DESIGN."
-              echo "::notice::Full boot needs the phase-2 frida capture (RegisterNatives table + full body dump)."
+              echo "::notice::ConfusionUtils neutralized, DE SDK SM4 engine initialized, DETool.dowork -> true)."
+              echo "::notice::Phase 3 de-natify removed the packer-only natives (805 -> 19 genuine JNI), fixed the"
+              echo "::notice::extraction-stub constructors (ctorfix super() injection) and killed the Ranger SDK"
+              echo "::notice::signing kill-switch, so a FATAL on main now means a NEW crash layer to diagnose at"
+              echo "::notice::the de-natify layer - compare with the previous boot-test crash before fixing."
               echo "::notice::See docs/en/06-dynamic-unpack.md."
             else
               echo "::error::main thread crashed with no real-app signature - see artifacts"
