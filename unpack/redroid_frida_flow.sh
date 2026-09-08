@@ -562,16 +562,16 @@ fi
 # runtime so there is exactly ONE source of truth in the repo.
 if [ -f ijiami-static/capture_aes_key.js ]; then
   cp ijiami-static/capture_aes_key.js frida-scripts/capture_aes_key.js
-  # 09_hide_frida.js: run 34171467849 - the gated process was SIGKILLed ~1s
-  # after resume (frida-agent memfd visible in /proc/self/maps + frida
-  # threads + the 47890 listener).  09 sanitizes those reads, hides the
-  # frida threads and blocks/logs the death ladder (kill/exit/abort) with a
-  # backtrace of the killer; the driver re-attaches to the AMS-restarted
-  # instance if it still dies.
-  PHASE2_GUARDS="02_bypass_ptrace.js,09_hide_frida.js,capture_aes_key.js"
-  echo "AES key capture + anti-anti-frida wired: GUARD_SCRIPTS=$PHASE2_GUARDS"
+  # Round 34175038958 matrix: the deep-stealth agent is now UNDETECTED
+  # (L1 alive) but the packer's code-integrity check flags the MODIFIED
+  # LIBC PROLOGUES - 09_hide_frida.js KILLS the process (L2 dead), and
+  # 02_bypass_ptrace.js is the same class of libc inline hook.  Both are
+  # DROPPED from the capture config; the driver's matrix decides whether
+  # capture_aes_key's libcrypto hooks are safe to keep.
+  PHASE2_GUARDS="capture_aes_key.js"
+  echo "AES key capture wired (no libc-hook guards): GUARD_SCRIPTS=$PHASE2_GUARDS"
 else
-  PHASE2_GUARDS="02_bypass_ptrace.js,09_hide_frida.js"
+  PHASE2_GUARDS=""
   echo "::warning::ijiami-static/capture_aes_key.js missing - running phase 2 without AES key capture"
 fi
 # keep the pre-driver boot log, then start a clean logcat for the app phase

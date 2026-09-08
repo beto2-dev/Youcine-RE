@@ -159,23 +159,26 @@ setInterval(function () {
 
 
 MATRIX_LEVELS = [
-    (0, "spawn-gate only (no attach)", []),
-    (1, "+ attach + empty script (agent presence)",
+    (1, "agent + empty script (control)",
      ["@empty"]),
-    (2, "+ 09_hide_frida.js (libc inline hooks)",
-     ["@empty", "09_hide_frida.js"]),
-    (3, "+ 02_bypass_ptrace.js (ptrace replace)",
-     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js"]),
-    (4, "+ capture_aes_key.js (crypto hooks)",
-     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
-      "capture_aes_key.js"]),
-    (5, "+ 06_register_natives_table.js (libart hooks)",
-     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
-      "capture_aes_key.js", "06_register_natives_table.js"]),
-    (6, "+ 07/08 (full failing config)",
-     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
-      "capture_aes_key.js", "06_register_natives_table.js",
-      "07_class_warmup.js", "08_redump_dex.js"]),
+    (2, "agent + 06+07+08+capture (CANDIDATE A: full capture stack)",
+     ["06_register_natives_table.js", "07_class_warmup.js",
+      "08_redump_dex.js", "capture_aes_key.js"]),
+    (3, "agent + 06+07+08 (capture stack without the AES hooks)",
+     ["06_register_natives_table.js", "07_class_warmup.js",
+      "08_redump_dex.js"]),
+    (4, "agent + 06 only (libart inline hooks)",
+     ["06_register_natives_table.js"]),
+    (5, "agent + 07 only (rpc warm-up, no hooks)",
+     ["07_class_warmup.js"]),
+    (6, "agent + 08 only (Memory reads + Java File)",
+     ["08_redump_dex.js"]),
+    (7, "agent + capture_aes_key only (libcrypto inline hooks)",
+     ["capture_aes_key.js"]),
+    (8, "agent + 02 only (ptrace replace - known suspect)",
+     ["02_bypass_ptrace.js"]),
+    (9, "agent + 09 only (libc inline hooks - KNOWN KILLER)",
+     ["09_hide_frida.js"]),
 ]
 
 
@@ -825,25 +828,48 @@ def main() -> int:
             load_names.append((name, path))
 
     # -- optional: detection-matrix probe BEFORE the capture pipeline -----
-    # Rounds 34171467849/34172332498/34172614416/34173015540 all die the
-    # same way (RegisterNatives withheld -> UnsatisfiedLinkError N.al ->
-    # kill/_exit ladder) despite maps/port/thread renaming.  The matrix
-    # determines WHICH instrumentation layer trips the ladder by spawning
-    # the app with cumulatively more instrumentation and a clean app state
-    # (am force-stop + pm clear) between levels:
-    #   L0 spawn-gate only (no attach, no scripts)
-    #   L1 + attach + an empty no-op script          (agent presence)
-    #   L2 + 09_hide_frida.js                        (libc inline hooks)
-    #   L3 + 02_bypass_ptrace.js                     (ptrace replacement)
-    #   L4 + capture_aes_key.js                      (crypto inline hooks)
-    #   L5 + 06_register_natives_table.js            (libart inline hooks)
-    #   L6 + 07/08                                   (the failing config)
-    # A final L0 re-run (control) detects persistent on-disk tamper flags.
+    # Round 34175038958 (deep-stealth server): L0 spawn-gate ALIVE,
+    # L1 agent-presence ALIVE (the stealth patch defeated the memory
+    # scan!), L2 + 09's libc inline hooks DEAD - the packer detects the
+    # MODIFIED LIBC PROLOGUES (code-integrity check).  02/09 are dropped
+    # from the capture config; the matrix now tests each capture layer in
+    # ISOLATION and picks the guard set for the actual capture run:
+    #   candidate A (level 2) = 06+07+08+capture_aes_key, no guards
+    #   candidate B (level 3) = 06+07+08 without the crypto hooks
     if PHASE2_MODE == "matrix":
         matrix_results = probe_matrix(device=None, scripts_dir=scripts_dir)
         (OUT / "matrix.json").write_text(
             json.dumps(matrix_results, indent=2) + "\n", encoding="utf-8")
         note(f"[phase2] matrix results: {json.dumps(matrix_results)}")
+
+        def _status(level: int) -> str:
+            for r in matrix_results:
+                if r.get("level") == level:
+                    return str(r.get("status") or "?")
+            return "?"
+
+        if _status(2) == "alive":
+            chosen_guards = ["capture_aes_key.js"]
+            note("[phase2] matrix verdict: candidate A (06+07+08+capture) "
+                 "survives - capture with the AES key hooks")
+        elif _status(3) == "alive":
+            chosen_guards = []
+            note("[phase2] matrix verdict: candidate B (06+07+08 without "
+                 "crypto hooks) survives - dropping capture_aes_key")
+        else:
+            chosen_guards = []
+            note("[!] matrix verdict: NO capture configuration survives - "
+                 "running the pipeline anyway for the evidence")
+        # rebuild the load list from the decided guards
+        load_names = []
+        for name in chosen_guards + phase2_names:
+            p = scripts_dir / name
+            if p.is_file():
+                load_names.append((name, p))
+            else:
+                note(f"[phase2] decided guard missing, skipping: {p}")
+        note(f"[phase2] capture-phase script list: "
+             f"{[n for n, _ in load_names]}")
 
     # -- step 3: remote device, spawn gated, attach ----------------------
     try:
