@@ -649,6 +649,7 @@ def run_warmup(warm_script, names: list[str]) -> dict:
     # materialized content lost with the process).  A snapshot every
     # WARMUP_CHECKPOINT_EVERY chunks keeps the capture crash-proof.
     checkpoint_every = _env_int("WARMUP_CHECKPOINT_EVERY", 20)
+    SWEEP_CHUNK = _env_int("WARMUP_SWEEP_CHUNK", 3)
     loaded_pre = rpc_watchdog(warm_script, "loadedcount", (),
                               "loadedcount (pre)", 120.0) \
         if not DETACHED["flag"] else None
@@ -687,6 +688,17 @@ def run_warmup(warm_script, names: list[str]) -> dict:
             note(f"[phase2] warm-up checkpoint {chunk_no}: {done}/{total} "
                  "classes - redump snapshot (SIGSTOP dump, ~40s)")
             redump_snapshot(f"warmup-cp{chunk_no}")
+            if chunk_no == SWEEP_CHUNK and rn_script is not None \
+                    and not out_of_budget("rn sweep (checkpoint)"):
+                # the JNI sweep runs MID-warmup: the app's own materialization
+                # engine crashes deterministically around class 21600 (runs
+                # 34190403091/34191092970), so a post-warmup sweep would
+                # never see the natives.  At checkpoint 3 (12000 classes:
+                # ALL of classes.dex + part of classes2) the app is still
+                # alive with a 9600-class margin.
+                r = rpc_watchdog(rn_script, "sweep", (240000,),
+                                 "rn sweep (mid-warmup)", 300.0)
+                note(f"[phase2] mid-warmup rn sweep result: {r}")
         write_warmup_stats(stats, done, total, loaded_pre=loaded_pre)
     loaded_post = None
     if not DETACHED["flag"] and not out_of_budget("loadedcount (post)"):
