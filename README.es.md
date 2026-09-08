@@ -202,6 +202,54 @@ carga; muere en el primer metodo ACC_NATIVE natificado por el packer
 - el arranque completo necesita el puente de-natify de fase 3).
 SOLO PARA INVESTIGACION.
 
+## Fase 3 - el puente de-natify (r4, 2026-09-09)
+
+El boot-test 34282297861 acoto los dos procesos-asesinos restantes
+despues de los fixes r3, y la r4 elimina ambos en la capa smali:
+
+1. **Los 6.529 CONSTRUCTORES stub de extraccion sin materializar.**
+   El warm-up de fase 2 cargo 21.600 de 32.459 clases de la app; el
+   resto conservo los cuerpos `return-void + nop` del packer en
+   declaraciones `<init>` *no nativas*, asi que la super-llamada r3
+   (que solo toco ctors con flag native) nunca les aplico - y el
+   verificador de ART rechaza cada uno al cargar la clase
+   (`VerifyError: da.w.<init>(String) ... Constructor returning
+   without calling superclass constructor`, muriendo en
+   `SplashAty.getMPresenter`). `unpack/denatify_redump.py` ahora
+   ANTEPONE una super-llamada resuelta a cada uno: la superclase
+   directa sale de las tablas de clases de los DEX (mas
+   `unpack/framework_ctors.py`, un extractor de android.jar que
+   produce los protos `<init>` accesibles de cada clase del framework
+   - el jar del SDK trae `.class` de Java, asi que el parser recorre
+   el constant pool). FORWARD de los registros de parametros cuando
+   el proto coincide exacto (`da.w(String) -> RuntimeException
+   (String)`), llamada `()V` cuando el super tiene ctor sin args, y
+   defaults sintetizados (null/0/0L) para superctores solo-con-args
+   (lambdas de Kotlin, las jerarquias package-private de
+   rx/retrofit). Las instrucciones stub restantes quedan como codigo
+   muerto inalcanzable que el verificador ignora, de modo que las
+   anotaciones, la info `.line` y los bloques `.param` sobreviven
+   intactos. Las trampas de formato estan cubiertas (listas de
+   registros de 4 bits del 35c frente a `invoke-direct/range`,
+   `move-object/from16`, `const/16` mas alla de v15, frames
+   `.registers`). Verificado por DEX: 0 ctors sin super quedan en la
+   salida.
+2. **El NPE del hilo handlerRanger.** Los stubs de-natificados de
+   `com.titan.ranger.NativeJni` devuelven null, asi que
+   `NativeJni$v.run -> Gson.fromJson(null) -> RangerResult.getRes()`
+   lanzo en el hilo `handlerRanger` - y una excepcion no capturada en
+   CUALQUIER hilo mata todo el proceso Android. El `run()` original se
+   renombra a `run$shielded` y un wrapper sintetizado `run()V`
+delega dentro de `try/catch Throwable`: el hilo del SDK degrada en
+silencio en lugar de matar la app.
+
+Totales en los ganadores 1.17.6: 8 natives REAL + 778 stubbed, 19 JNI
+genuina conservada, 1 `<clinit>` guardado, 1 hilo blindado, 6.529
+fixes de ctor (1.522 forward / 3.969 sin-args / 1.038 defaults / 0
+left). El workflow **Booteable research APK** corre toda la cadena en
+CI y el boot test encadenado reporta el veredicto. SOLO PARA
+INVESTIGACION.
+
 ## Documentacion
 
 Tabla equivalente en [README.md](README.md). Mapa maquina:
@@ -215,7 +263,7 @@ Tabla equivalente en [README.md](README.md). Mapa maquina:
 | `dumps-1.17.6` | DEX pristinos del dump fase 1 (checksums reparados) |
 | `phase2-1.17.6` | Evidencia fase 2: snapshots del re-dump, jni_table, imagenes de modulos |
 | `unpacked-1.17.6` | APK de investigacion sin shell iJiami (DEX fase 1, cuerpos stub) |
-| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados (descifrado estatico), codigo real hasta App.onCreate:139 (verificado por boot test)** |
+| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados + de-natify r4 fase 3 (descifrado estatico + inyeccion de super-llamada en ctors + blindaje de hilo), resultado verificado por boot test** |
 
 ## Legal
 

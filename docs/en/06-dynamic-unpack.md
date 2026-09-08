@@ -413,3 +413,80 @@ If the AES key is captured during a Phase-2 run (or hunted in the
 dumps artifacts), `decrypt_ijiami_dat.py` yields the four payloads
 fully offline - an independent cross-validation of the runtime dump
 and the only path that does not need the packer engine at all.
+
+## Phase 3 - the de-natify bridge (r4, 2026-09-09)
+
+### What boot-test 34282297861 proved
+
+With r3 in (REAL SqlHelper bodies, guarded `NativeJni.<clinit>`), the
+booteable build still died twice:
+
+1. **Main thread**: `java.lang.VerifyError: Verifier rejected class
+   da.w: void da.w.<init>(java.lang.String) failed to verify:
+   Constructor returning without calling superclass constructor` at
+   `SplashAty.getMPresenter -> kotlin.jvm.internal.m.x -> m.w`. `da.w`
+   is a `RuntimeException` subclass whose ctor body is the packer's
+   `return-void + 3x nop` stub - and it is **not native-flagged**, so
+   neither the de-natify STUB path nor the r3 super-call (native ctors
+   only) ever touched it.
+2. **handlerRanger thread**: `NullPointerException:
+   RangerResult.getRes()` on a null object - `NativeJni$v.run` called
+   the de-natified `NativeJni.d(...)` stub (returns null), Gson parsed
+   null, and the NPE killed the process 840 ms after the main crash.
+
+### The scale of the un-materialized stub problem
+
+A raw-DEX census of the 5 booteable winners (opcode-level: a real ctor
+always contains an invoke-direct/-super 0x6f/0x70/0x75/0x76): **6,529
+constructors** in 6,059 classes keep stub bodies - the warm-up covered
+21,600 of 32,459 app classes; the remaining ~11k classes (the "abort
+was called" / broken-agent chunks of the sweep) never fired libexec's
+re-materialization. Every one of those ctors is a class-load
+VerifyError waiting to happen; `da.w` was merely the first on the boot
+path.
+
+### The r4 fix (denatify_redump.py + framework_ctors.py)
+
+* `DexClassMap` - a cross-DEX parser (string/type/proto/method/class
+  tables, differential method indices per list) builds: every class'
+  direct superclass, every `<init>` proto+flags, and the bad-ctor list.
+* `unpack/framework_ctors.py` - extracts every framework class'
+  accessible (public/protected, non-abstract) `<init>` protos from
+  `android.jar`. The SDK jar ships Java `.class` files (javac needs
+  bytecode), so the parser walks the constant pool; method descriptors
+  share the DEX proto grammar, no translation needed. Layered under it:
+  a built-in java.lang/atomics table + the boot-classpath
+  org.apache.http legacy classes the API-30 jar dropped.
+* `choose_super_call` - resolves the invocation target per bad ctor:
+  * in-app super: exact-proto FORWARD (param registers reused:
+    `invoke-direct {p0, p1}`; `invoke-direct/range` past 5 words or
+    v15), else `()V` NOARG, else DEFAULTS (null/0/0L synthesized for
+    the super's shortest accessible proto). Accessibility: public,
+    protected, or package-private when the subclass shares the package
+    (the obfuscated rx/retrofit hierarchies strip access flags to
+    ACC_CONSTRUCTOR-only).
+  * framework super: same three modes against the android.jar table.
+* The super-call is **PREPENDED** to the stub body: the original
+  `return-void + nops` becomes unreachable dead code that the ART
+  verifier skips (it only verifies reachable instructions), so
+  annotations, `.line` info and `.param` blocks survive untouched.
+* Encoding traps handled: 35c 4-bit register nibbles vs
+  `invoke-direct/range`; `move-object/from16` (plain move-object is
+  12x - both registers 4-bit); `const/16` past v15; `.registers`
+  frames converted to effective locals; wide (J/D) register pairs.
+* Native-flagged ctor stubs get the same resolved super-call inside
+  their synthesized default body (r3 injected `Object.<init>`, which
+  only verifies when Object IS the direct superclass).
+* **RUN SHIELD**: `NativeJni$v.run()` is renamed to `run$shielded` and
+  a synthesized `run()V` wrapper delegates inside
+  `try/catch Throwable` - an uncaught exception on ANY thread kills
+  the whole Android process, so the SDK thread now degrades silently.
+
+### Verification (hard, per output DEX)
+
+class count equal, method count equal (+1 per shielded run wrapper),
+natives remaining == exactly the KEEP set, super-less ctors remaining
+== the "left" list (0 on the 1.17.6 winners with the framework table).
+Totals: 8 REAL + 778 stubbed natives, 19 kept, 1 guarded clinit, 1
+shielded thread, 6,529 ctor fixes (1,522 forward / 3,969 noarg /
+1,038 defaults / 0 left).

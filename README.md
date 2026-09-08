@@ -198,6 +198,49 @@ materialized code to line 139, DE SDK loads; dies at the first
 packer-natified ACC_NATIVE method - full boot needs the phase-3
 de-natify bridge). RESEARCH USE ONLY.
 
+## Phase 3 - the de-natify bridge (r4, 2026-09-09)
+
+Boot-test 34282297861 pinned the two remaining process-killers after the
+r3 fixes, and r4 removes both at the smali layer:
+
+1. **The 6,529 un-materialized extraction-stub CONSTRUCTORS.** The
+   phase-2 warm-up loaded 21,600 of 32,459 app classes; the rest kept
+   the packer's `return-void + nop` bodies in *non-native* `<init>`
+   declarations, so the r3 super-call (which only touched
+   native-flagged ctors) never applied to them - and the ART verifier
+   rejects every one at class-load time (`VerifyError: da.w.<init>(
+   String) ... Constructor returning without calling superclass
+   constructor`, dying at `SplashAty.getMPresenter`).
+   `unpack/denatify_redump.py` now PREPENDS a resolved super-call to
+   each one: the direct superclass comes from the DEX class tables
+   (plus `unpack/framework_ctors.py`, an android.jar extractor that
+   yields every framework class' accessible `<init>` protos - the SDK
+   jar ships Java `.class` files, so the parser walks the constant
+   pool). FORWARD the parameter registers on an exact proto match
+   (`da.w(String) -> RuntimeException(String)`), a `()V` call when the
+   super has a no-arg ctor, and synthesized defaults (null/0/0L) for
+   arg-only superctors (Kotlin lambdas, the rx/retrofit package-private
+   hierarchies). The remaining stub instructions become unreachable
+   dead code the verifier skips, so annotations, `.line` info and
+   `.param` blocks survive untouched. Format-encoding traps are handled
+   (35c 4-bit register lists vs `invoke-direct/range`,
+   `move-object/from16`, `const/16` past v15, `.registers` frames).
+   Verified per DEX: 0 super-less ctors remain in the output.
+2. **The ranger handler-thread NPE.** The de-natified
+   `com.titan.ranger.NativeJni` stubs return null, so
+   `NativeJni$v.run -> Gson.fromJson(null) -> RangerResult.getRes()`
+   threw on the `handlerRanger` thread - and an uncaught exception on
+   ANY thread kills the whole Android process. The original `run()` is
+   renamed to `run$shielded` and a synthesized `run()V` wrapper
+   delegates inside `try/catch Throwable`: the SDK thread degrades
+   silently instead of killing the app.
+
+Totals on the 1.17.6 winners: 8 REAL + 778 stubbed natives, 19 kept
+genuine JNI, 1 guarded `<clinit>`, 1 shielded thread, 6,529 ctor fixes
+(1,522 forward / 3,969 no-arg / 1,038 defaults / 0 left). The
+**Booteable research APK** workflow runs the whole chain in CI and the
+chained boot test reports the verdict. RESEARCH USE ONLY.
+
 ## Documentation
 
 | EN | ES |
@@ -221,7 +264,7 @@ Machine-readable map: `evidence/findings.json`. Stub sources from Jadx:
 | `dumps-1.17.6` | Pristine phase-1 dump DEXes (checksum-repaired) |
 | `phase2-1.17.6` | Phase-2 evidence: re-dump snapshots, jni_table, module images |
 | `unpacked-1.17.6` | Research APK with iJiami shell removed (phase-1 DEXes, stub bodies) |
-| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes (static decryption), boot-test research outcome (real code to App.onCreate:139)** |
+| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes + phase-3 de-natify r4 (static decryption + ctor super-call injection + thread shield), boot-test verified outcome** |
 
 ## Legal
 

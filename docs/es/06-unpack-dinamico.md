@@ -430,3 +430,88 @@ artefactos de dumps), `decrypt_ijiami_dat.py` produce los cuatro
 payloads totalmente offline - una validación cruzada e independiente
 del dump en runtime y el único camino que no necesita para nada el
 motor del packer.
+
+## Fase 3 - el puente de-natify (r4, 2026-09-09)
+
+### Lo que probo el boot-test 34282297861
+
+Con la r3 puesta (cuerpos REAL del SqlHelper, `NativeJni.<clinit>`
+guardado), el build booteable seguia muriendo dos veces:
+
+1. **Hilo principal**: `java.lang.VerifyError: Verifier rejected class
+   da.w: void da.w.<init>(java.lang.String) failed to verify:
+   Constructor returning without calling superclass constructor` en
+   `SplashAty.getMPresenter -> kotlin.jvm.internal.m.x -> m.w`. `da.w`
+   es una subclase de `RuntimeException` cuyo cuerpo de ctor es el stub
+   `return-void + 3x nop` del packer - y **no tiene flag native**, asi
+   que ni el camino STUB del de-natify ni la super-llamada r3 (solo
+   ctors nativos) le aplicaron jamas.
+2. **Hilo handlerRanger**: `NullPointerException: RangerResult.getRes()`
+   sobre null - `NativeJni$v.run` llamo al stub de-natificado
+   `NativeJni.d(...)` (devuelve null), Gson parseo null, y el NPE mato
+   el proceso 840 ms despues del crash principal.
+
+### La escala del problema de stubs sin materializar
+
+Un censo raw-DEX de los 5 ganadores booteables (a nivel de opcodes: un
+ctor real siempre contiene un invoke-direct/-super 0x6f/0x70/0x75/0x76):
+**6.529 constructores** en 6.059 clases conservan cuerpos stub - el
+warm-up cubrio 21.600 de 32.459 clases de la app; las ~11k clases
+restantes (los chunks "abort was called" / agente roto del sweep) nunca
+dispararon la re-materializacion de libexec. Cada uno de esos ctors es
+un VerifyError de carga de clase esperando a ocurrir; `da.w` era solo
+el primero en el camino de arranque.
+
+### El fix r4 (denatify_redump.py + framework_ctors.py)
+
+* `DexClassMap` - un parser cross-DEX (tablas de
+  string/type/proto/method/class, indices diferenciales por lista)
+  construye: la superclase directa de cada clase, cada proto+flags de
+  `<init>`, y la lista de ctors malos.
+* `unpack/framework_ctors.py` - extrae los protos `<init>` accesibles
+  (public/protected, no abstract) de cada clase del framework desde
+  `android.jar`. El jar del SDK trae `.class` de Java (javac necesita
+  bytecode), asi que el parser recorre el constant pool; los
+  descriptores de metodo comparten la gramatica de los protos DEX, sin
+  traduccion. En capa inferior: una tabla embebida de
+  java.lang/atomics + las clases legacy org.apache.http del
+  boot-classpath que el jar API-30 elimino.
+* `choose_super_call` - resuelve el objetivo de invocacion por ctor
+  malo:
+  * super in-app: FORWARD con proto exacto (registros de parametros
+    reutilizados: `invoke-direct {p0, p1}`; `invoke-direct/range` a
+    partir de 5 words o v15), si no NOARG `()V`, si no DEFAULTS
+    (null/0/0L sintetizados para el proto accesible mas corto del
+    super). Accesibilidad: public, protected, o package-private cuando
+    la subclase comparte paquete (las jerarquias ofuscadas de
+    rx/retrofit dejan los flags de acceso en solo-ACC_CONSTRUCTOR).
+  * super del framework: los mismos tres modos contra la tabla de
+    android.jar.
+* La super-llamada se **ANTEPONE** al cuerpo stub: el `return-void +
+  nops` original queda como codigo muerto inalcanzable que el
+  verificador de ART ignora (solo verifica instrucciones alcanzables),
+  de modo que las anotaciones, la info `.line` y los bloques `.param`
+  sobreviven intactos.
+* Trampas de codificacion cubiertas: nibbles de 4 bits del 35c frente
+  a `invoke-direct/range`; `move-object/from16` (el move-object simple
+  es 12x - ambos registros de 4 bits); `const/16` mas alla de v15;
+  frames `.registers` convertidos a locales efectivos; pares de
+  registros wide (J/D).
+* Los ctors stub con flag native reciben la misma super-llamada
+  resuelta dentro de su cuerpo default sintetizado (la r3 inyectaba
+  `Object.<init>`, que solo verifica cuando Object ES la superclase
+  directa).
+* **BLINDAJE DE RUN**: `NativeJni$v.run()` se renombra a
+  `run$shielded` y un wrapper sintetizado `run()V` delega dentro de
+  `try/catch Throwable` - una excepcion no capturada en CUALQUIER hilo
+  mata todo el proceso Android, asi que el hilo del SDK ahora degrada
+  en silencio.
+
+### Verificacion (dura, por DEX de salida)
+
+conteo de clases igual, conteo de metodos igual (+1 por wrapper de run
+blindado), natives restantes == exactamente el set KEEP, ctors sin
+super restantes == la lista "left" (0 en los ganadores 1.17.6 con la
+tabla del framework). Totales: 8 natives REAL + 778 stubbed, 19
+conservados, 1 clinit guardado, 1 hilo blindado, 6.529 fixes de ctor
+(1.522 forward / 3.969 noarg / 1.038 defaults / 0 left).

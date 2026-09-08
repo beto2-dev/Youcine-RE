@@ -22,7 +22,22 @@ name: Booteable research APK (phase-2 redump DEXes + de-natify)
 #        REAL bodies for the Aria SqlHelper (verified against the upstream
 #        ORM), synthesized default returns for the rest.  This removes the
 #        UnsatisfiedLinkError that killed the previous booteable build at
-#        App.onCreate:139 -> Aria.init -> SqlHelper.getDb.
+#        App.onCreate:139 -> Aria.init -> SqlHelper.getDb.  Phase-3 r4
+#        also PREPENDS a super-constructor invocation into every one of
+#        the 6,529 UN-MATERIALIZED extraction-stub ctors (the warm-up
+#        materialized 21,600/32,459 classes - the rest kept the packer's
+#        return-void+nop bodies in NON-native ctors and died at
+#        class-load: VerifyError da.w.<init>(String) "Constructor
+#        returning without calling superclass constructor", boot-test
+#        34282297861), resolving each direct superclass from the DEX
+#        class tables + a framework <init> table extracted from
+#        android.jar (unpack/framework_ctors.py): FORWARD the parameter
+#        registers on an exact proto match, ()V call otherwise,
+#        synthesized defaults (null/0) for arg-only superctors; and
+#        SHIELDS the ranger handler thread (run$shielded rename-wrap,
+#        try/catch Throwable) whose de-natified native returned null and
+#        NPE'd RangerResult.getRes() - an uncaught exception on ANY
+#        thread kills the Android process.
 #     3. rebuilds the packer-stripped APK around them (the proven v4
 #        pipeline: BootProvider DE-SDK load + ConfusionUtils kill-switch
 #        neutralized + byte-identical per-ABI DE assets),
@@ -113,11 +128,19 @@ jobs:
           # The 5 apktool round-trips (decode 54 MB of DEX -> smali ->
           # rebuild) take ~8 min on a 2-core runner; the step hard-verifies
           # class/method counts and that only the KEEP natives survive.
+          # Framework ctor table first: the phase-3 r4 super-call injector
+          # resolves the accessible <init> protos of framework superclasses
+          # (View/Dialog/Handler/atomics/apache-http...) from the platform
+          # jar this job already installs.
+          python3 unpack/framework_ctors.py \
+            --jar "$ANDROID_HOME/platforms/android-30/android.jar" \
+            --out work/framework-ctors.json
           python3 unpack/denatify_redump.py \
             --dex-dir  work/booteable-dexes \
             --out-dir  work/denatified-dexes \
             --bodies   unpack/denatify_bodies.json \
-            --apktool  "$APKTOOL_JAR"
+            --apktool  "$APKTOOL_JAR" \
+            --framework-ctors work/framework-ctors.json
           ls -la work/denatified-dexes/
           cat work/denatified-dexes/denatify_report.json | python3 -c \
             "import json,sys; r=json.load(sys.stdin); print('totals:', r['totals'])"
@@ -206,7 +229,7 @@ jobs:
           sha256sum work/youcine-1.17.6-booteable.apk | tee work/booteable.sha256
           gh release create booteable-1.17.6 \
             --title "Booteable research build 1.17.6 (static descifrado)" \
-            --notes "YouCine 1.17.6 rebuilt around the PHASE-2 re-dump DEXes + PHASE-3 de-natify: the warm-up materialized the iJiami extraction-stub method bodies in memory (up to 941 KB of real code per DEX) and the interleaved SIGSTOP snapshots captured them; dedup_redump.py picked the most-materialized snapshot of each of the 5 DEX layouts; denatify_redump.py then unbound the ~800 packer-only natives (19 genuine JNI kept, Aria SqlHelper restored with REAL upstream-verified bodies, rest synthesized defaults) removing the UnsatisfiedLinkError at App.onCreate. Same v4 boot fixes (BootProvider DE-SDK load, ConfusionUtils kill-switch neutralized, byte-identical per-ABI DE assets). Boot is verified by the chained boot-test workflow. RESEARCH USE ONLY - see README." \
+            --notes "YouCine 1.17.6 rebuilt around the PHASE-2 re-dump DEXes + PHASE-3 de-natify r4: the warm-up materialized the iJiami extraction-stub method bodies in memory (up to 941 KB of real code per DEX) and the interleaved SIGSTOP snapshots captured them; dedup_redump.py picked the most-materialized snapshot of each of the 5 DEX layouts; denatify_redump.py then unbound the ~800 packer-only natives (19 genuine JNI kept, Aria SqlHelper restored with REAL upstream-verified bodies, rest synthesized defaults) removing the UnsatisfiedLinkError at App.onCreate, injected a resolved super-constructor call into ALL 6,529 un-materialized extraction-stub ctors (DEX class tables + android.jar framework table: FORWARD on exact proto match, ()V otherwise, synthesized defaults for arg-only superctors - kills the VerifyError 'Constructor returning without calling superclass constructor' at class-load), and shielded the ranger handler thread (run method renamed and wrapped in try/catch Throwable) whose null stub result NPE'd. Same v4 boot fixes (BootProvider DE-SDK load, ConfusionUtils kill-switch neutralized, byte-identical per-ABI DE assets). Boot is verified by the chained boot-test workflow. RESEARCH USE ONLY - see README." \
             --target "$GITHUB_SHA" || true
           gh release upload booteable-1.17.6 \
             work/youcine-1.17.6-booteable.apk work/booteable.sha256 --clobber || true
