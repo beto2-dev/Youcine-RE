@@ -152,12 +152,18 @@ jobs:
                   "%s: header file_size %d != stored %d" % (n, hdr_size, len(d))
               print("[+] %s: %d bytes, header consistent" % (n, len(d)))
           # the dedup winners must be INSIDE the APK byte-identical
+          # (classes.dex goes through patch_confusion_cc.py on purpose -
+          # compare that one against the patched copy the rebuild left
+          # in work/build/)
           import hashlib, pathlib
           for p in sorted(pathlib.Path("work/booteable-dexes").glob("*.dex")):
-              want = hashlib.sha256(p.read_bytes()).hexdigest()
+              ref = pathlib.Path("work/build") / ("confusion-patched-" + p.name)
+              if not ref.is_file():
+                  ref = p
+              want = hashlib.sha256(ref.read_bytes()).hexdigest()
               got = hashlib.sha256(z.read(p.name)).hexdigest()
-              assert want == got, p.name + ": APK copy differs from the dedup winner"
-          print("[+] all 5 dedup winners embedded byte-identical")
+              assert want == got, p.name + ": APK copy differs from " + str(ref)
+          print("[+] all 5 dedup winners embedded byte-identical (confusion patch applied to its carrier)")
           # binary AXML stores the string pool as UTF-16LE
           man = z.read("AndroidManifest.xml")
           for probe in ("com.youcine.re.BootProvider",
