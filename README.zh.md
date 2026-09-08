@@ -127,8 +127,10 @@ observe-only 扫描结果只存活于目标进程内（壳的多层自杀机制�
 布局中选出物化程度最高的快照（即与 `dumps-1.17.6` 原始基线差异最大者），
 **Booteable research APK** 工作流围绕这 5 个 DEX 重建去壳 APK ——
 也就是应用自身执行的那些方法体，即 YouCine + 静态解密的代码 ——
-发布 `booteable-1.17.6` Release 并链接 boot test 作为 CI 证明。
-仅供研究使用。
+发布 `booteable-1.17.6` Release 并链接 boot test：CI 验证的 RESEARCH
+OUTCOME（可安装、provider 正常安装、App.onCreate 执行真实物化代码至
+第 139 行、DE SDK 成功加载；在壳 natify 化的第一个 ACC_NATIVE 方法处
+停止 —— 完整启动需要第三阶段的 de-natify 桥接）。仅供研究使用。
 
 ## 文档
 
@@ -154,7 +156,7 @@ observe-only 扫描结果只存活于目标进程内（壳的多层自杀机制�
 | `dumps-1.17.6` | 第一阶段原始转储 DEX（校验和已修复） |
 | `phase2-1.17.6` | 第二阶段证据：重转储快照、jni_table、模块镜像 |
 | `unpacked-1.17.6` | 移除 iJiami 壳后的研究性 APK（第一阶段 DEX，桩方法体） |
-| `booteable-1.17.6` | **可启动研究 APK：第二阶段物化 DEX（静态解密），启动已经 boot test 验证** |
+| `booteable-1.17.6` | **可启动研究 APK：第二阶段物化 DEX（静态解密），真实代码运行至 App.onCreate:139（boot test 验证）** |
 
 ## 法律声明
 

@@ -192,8 +192,11 @@ most from the pristine `dumps-1.17.6` baseline) and the
 **Booteable research APK** workflow rebuilds the packer-stripped APK
 around those 5 DEXes - the same bodies the app itself executes, i.e.
 YouCine + statically decrypted code - publishing the
-`booteable-1.17.6` release and chaining the boot test as CI proof.
-RESEARCH USE ONLY.
+`booteable-1.17.6` release and chaining the boot test: CI-verified
+RESEARCH OUTCOME (installs, providers install, App.onCreate runs real
+materialized code to line 139, DE SDK loads; dies at the first
+packer-natified ACC_NATIVE method - full boot needs the phase-3
+de-natify bridge). RESEARCH USE ONLY.
 
 ## Documentation
 
@@ -218,7 +221,7 @@ Machine-readable map: `evidence/findings.json`. Stub sources from Jadx:
 | `dumps-1.17.6` | Pristine phase-1 dump DEXes (checksum-repaired) |
 | `phase2-1.17.6` | Phase-2 evidence: re-dump snapshots, jni_table, module images |
 | `unpacked-1.17.6` | Research APK with iJiami shell removed (phase-1 DEXes, stub bodies) |
-| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes (static decryption), boot-test-verified** |
+| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes (static decryption), boot-test research outcome (real code to App.onCreate:139)** |
 
 ## Legal
 

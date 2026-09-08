@@ -195,7 +195,11 @@ baseline pristino de `dumps-1.17.6`) y el workflow **Booteable
 research APK** reconstruye la APK sin packer alrededor de esos 5 DEX -
 los mismos cuerpos que la propia app ejecuta, es decir, YouCine +
 codigo estaticamente descifrado - publicando el release
-`booteable-1.17.6` y encadenando el boot test como prueba en CI.
+`booteable-1.17.6` y encadenando el boot test: RESEARCH OUTCOME
+verificado en CI (instala, los providers se instalan, App.onCreate
+ejecuta codigo real materializado hasta la linea 139, el SDK DE
+carga; muere en el primer metodo ACC_NATIVE natificado por el packer
+- el arranque completo necesita el puente de-natify de fase 3).
 SOLO PARA INVESTIGACION.
 
 ## Documentacion
@@ -211,7 +215,7 @@ Tabla equivalente en [README.md](README.md). Mapa maquina:
 | `dumps-1.17.6` | DEX pristinos del dump fase 1 (checksums reparados) |
 | `phase2-1.17.6` | Evidencia fase 2: snapshots del re-dump, jni_table, imagenes de modulos |
 | `unpacked-1.17.6` | APK de investigacion sin shell iJiami (DEX fase 1, cuerpos stub) |
-| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados (descifrado estatico), arranque verificado por boot test** |
+| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados (descifrado estatico), codigo real hasta App.onCreate:139 (verificado por boot test)** |
 
 ## Legal
 

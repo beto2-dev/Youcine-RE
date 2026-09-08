@@ -142,8 +142,12 @@ choisit le snapshot le plus matérialisé de chaque disposition DEX
 le workflow **Booteable research APK** reconstruit l'APK sans packer
 autour de ces 5 DEX - les mêmes corps que l'application exécute
 elle-même, c'est-à-dire YouCine + code statiquement déchiffré - en
-publiant la Release `booteable-1.17.6` et en enchaînant le boot test
-comme preuve CI. POUR LA RECHERCHE UNIQUEMENT.
+publiant la Release `booteable-1.17.6` et en enchaînant le boot test :
+RESEARCH OUTCOME vérifié en CI (installation OK, providers installés,
+App.onCreate exécute du code réel matérialisé jusqu'à la ligne 139, le
+SDK DE se charge ; meurt au premier méthode ACC_NATIVE natifiée par le
+packer - le démarrage complet nécessite le pont de-natify de phase 3).
+POUR LA RECHERCHE UNIQUEMENT.
 
 ## Documentation
 
@@ -169,7 +173,7 @@ Carte lisible par machine : `evidence/findings.json`. Sources du stub issues de 
 | `dumps-1.17.6` | DEX vierges du dump phase 1 (checksums réparés) |
 | `phase2-1.17.6` | Preuves phase 2 : snapshots du re-dump, jni_table, images de modules |
 | `unpacked-1.17.6` | APK de recherche sans shell iJiami (DEX phase 1, corps stub) |
-| `booteable-1.17.6` | **APK de recherche amorçable : DEX phase 2 matérialisés (déchiffrement statique), démarrage vérifié par boot test** |
+| `booteable-1.17.6` | **APK de recherche amorçable : DEX phase 2 matérialisés (déchiffrement statique), code réel jusqu'à App.onCreate:139 (boot test)** |
 
 ## Juridique
 
