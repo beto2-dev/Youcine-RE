@@ -1037,18 +1037,6 @@ def main() -> int:
         if warm_script is None:
             note("[phase2] 07 script not loaded - skipping warm-up")
 
-    # -- step 9b: OBSERVE-ONLY RegisterNatives sweep (06 v3) --------------
-    # 06 no longer hooks anything (every interception - inline code patch
-    # or vtable data swap - is detected by the packer's VMP); it runs a
-    # post-hoc Java reflection sweep over the loaded classes once the
-    # warm-up has materialized them, so the table is read AFTER the sweep.
-    if rn_script is not None and names:
-        remaining = max(1, int(DEADLINE - time.time()))
-        r = rpc_watchdog(rn_script, "sweep",
-                         (min(300000, remaining * 1000),),
-                         "rn sweep (post-warm-up)", 600.0)
-        note(f"[phase2] rn sweep result: {r}")
-
     # -- step 10: post-warm-up quiet-window (new registrations expected
     # as libexec re-materializes classes) --------------------------------
     if rn_script is not None and not DETACHED["flag"] \
@@ -1064,28 +1052,8 @@ def main() -> int:
     if redump_script is not None and not out_of_budget("post module dumps"):
         module_dump_cycle(redump_script, "post")
 
-    # -- step 12: final JNI table ----------------------------------------
+    # -- step 12: JNI table so far (events only; the sweep fills it later)
     rn_methods_total = sum(len(v) for v in RN_TABLE.values())
-    if rn_script is not None and not DETACHED["flag"] \
-            and not out_of_budget("jni table cross-check"):
-        # cross-check with the in-script table; adopt it if events were
-        # lost (send() drop) or the driver-side accumulation is empty
-        tbl = rpc_watchdog(rn_script, "table", (), "table() cross-check", 120.0)
-        if isinstance(tbl, dict):
-            tbl_methods = sum(len(v) for v in tbl.values())
-            note(f"[phase2] jni table cross-check: driver-side "
-                 f"{rn_methods_total} vs script-side {tbl_methods}")
-            if tbl_methods > rn_methods_total:
-                if rn_methods_total == 0:
-                    note("[phase2] adopting script-side table "
-                         "(driver-side accumulation was empty)")
-                RN_TABLE = tbl
-                rn_methods_total = tbl_methods
-    (OUT / "jni_table.json").write_text(
-        json.dumps(RN_TABLE, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8")
-    note(f"[phase2] jni_table: {len(RN_TABLE)} classes / {rn_methods_total} "
-         f"methods -> {OUT / 'jni_table.json'}")
 
     # -- step 13: AUTHORITATIVE out-of-process re-dump -------------------
     # in-proc reads cannot cross the -wxp no-read pieces of the DEX spans;
@@ -1117,6 +1085,40 @@ def main() -> int:
             "--out-dir", str(OUT / "repaired"),
             "--min-size", "65536"]
     run_step_subprocess(vcmd, "validate", 300.0)
+
+    # -- step 14b: OBSERVE-ONLY RegisterNatives sweep (06 v3) - LAST risky
+    # step: the bridge-based reflection storm over 21k classes killed the
+    # app in run 34183750848 (10 minutes in, after the module dumps).  It
+    # now runs AFTER the authoritative redump + validate so its failure
+    # can no longer cost the DEX capture; the sweep populates the table
+    # fetched right below.
+    if rn_script is not None and names and not DETACHED["flag"] \
+            and not out_of_budget("rn sweep"):
+        remaining = max(1, int(DEADLINE - time.time()))
+        r = rpc_watchdog(rn_script, "sweep",
+                         (min(300000, remaining * 1000),),
+                         "rn sweep (post-redump)", 600.0)
+        note(f"[phase2] rn sweep result: {r}")
+
+    # -- step 14c: final JNI table (script-side fetch, post-sweep) --------
+    if rn_script is not None and not DETACHED["flag"] \
+            and not out_of_budget("jni table fetch"):
+        tbl = rpc_watchdog(rn_script, "table", (), "table() fetch", 120.0)
+        if isinstance(tbl, dict):
+            tbl_methods = sum(len(v) for v in tbl.values())
+            note(f"[phase2] jni table: driver-side {rn_methods_total} vs "
+                 f"script-side {tbl_methods}")
+            if tbl_methods > rn_methods_total:
+                if rn_methods_total == 0:
+                    note("[phase2] adopting script-side table "
+                         "(driver-side accumulation was empty)")
+                RN_TABLE = tbl
+                rn_methods_total = tbl_methods
+    (OUT / "jni_table.json").write_text(
+        json.dumps(RN_TABLE, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    note(f"[phase2] jni_table: {len(RN_TABLE)} classes / {rn_methods_total} "
+         f"methods -> {OUT / 'jni_table.json'}")
 
     # -- step 15: pull in-process artifacts -------------------------------
     pull_inproc_artifacts()

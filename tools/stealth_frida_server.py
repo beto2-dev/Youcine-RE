@@ -252,6 +252,17 @@ def forbidden_ranges(data: bytes) -> list:
     return sorted(rng)
 
 
+def find_all(data: bytes, needle: bytes) -> list:
+    out = []
+    i = 0
+    while True:
+        i = data.find(needle, i)
+        if i < 0:
+            return out
+        out.append((i, i + len(needle)))
+        i += 1
+
+
 def in_forbidden(off: int, rng: list) -> bool:
     return any(lo <= off < hi for lo, hi in rng)
 
@@ -390,7 +401,9 @@ def main() -> int:
     argv = sys.argv[1:]
     verify_only = "--verify-only" in argv
     deep = "--deep" in argv
-    args = [a for a in argv if a not in ("--verify-only", "--deep")]
+    keep_symbol = "--keep-agent-symbol" in argv
+    args = [a for a in argv if a not in ("--verify-only", "--deep",
+                                        "--keep-agent-symbol")]
     if len(args) != 1:
         print(__doc__)
         return 1
@@ -425,6 +438,11 @@ def main() -> int:
     # pass 2 (deep): every frida/Frida outside executable code
     if deep:
         forbidden = forbidden_ranges(bytes(data))
+        if keep_symbol:
+            # keep the agent entry symbol (and its hash-table entries)
+            # intact - used for LOCAL reproduction where stealth is
+            # irrelevant and GNU-hash agents cannot be re-linked yet
+            forbidden.extend(find_all(bytes(data), b"frida_agent_main"))
         print(f"[stealth] deep mode: {len(forbidden)} executable range(s) "
               f"protected: {[hex(lo) + '-' + hex(hi) for lo, hi in forbidden]}")
         for needle, repl in DEEP:

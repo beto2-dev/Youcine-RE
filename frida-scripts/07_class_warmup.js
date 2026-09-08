@@ -72,24 +72,26 @@ function getLoaders() {
   }
   var out = [];
   var seen = {};
-  var ClassLoader = Java.use('java.lang.ClassLoader');
-  function add(l) {
+  function add(h) {
     try {
-      var casted = Java.cast(l, ClassLoader);
-      var key = String(casted.$h);
+      var key = String(h);
       if (seen[key]) {
         return;
       }
       seen[key] = true;
-      out.push(casted);
+      out.push(h);
     } catch (e) {
       // keep going - a broken loader entry loses one candidate, not the sweep
     }
   }
+  // raw jobject handles: the bridge wrapper's $handle is the raw loader
+  // object (the bridge's METHOD MARSHALLING is broken under the stealth
+  // patch - $borrowClassHandle TypeError - but wrapper creation and the
+  // raw JNIEnv are fully functional, run 34183750848)
   try {
     var main = Java.classFactory.loader;
-    if (main) {
-      add(main);
+    if (main && main.$handle) {
+      add(ptr(main.$handle));
     }
   } catch (e) {
     log('classFactory.loader: ' + e);
@@ -97,7 +99,11 @@ function getLoaders() {
   try {
     Java.enumerateClassLoaders({
       onMatch: function (loader) {
-        add(loader);
+        try {
+          if (loader && loader.$handle) {
+            add(ptr(loader.$handle));
+          }
+        } catch (e) {}
       },
       onComplete: function () {}
     });
@@ -105,19 +111,112 @@ function getLoaders() {
     log('enumerateClassLoaders: ' + e);
   }
   LOADERS = out;
-  log('loader cascade: ' + out.length + ' classloader(s)');
+  log('loader cascade: ' + out.length + ' classloader(s) (raw handles)');
   return out;
+}
+
+/* ------------------------------------------------------------------
+ * raw-JNI warm-up: call Class.forName(String, boolean, ClassLoader)
+ * DIRECTLY through the JNIEnv function table.  Vtable indices from the
+ * authoritative jni.h struct order (+4 reserved slots, validated by the
+ * two proven anchors RegisterNatives@215 and GetObjectRefType@232):
+ * FindClass@6, GetMethodID@33, GetObjectClass@31, CallObjectMethod@34,
+ * GetStaticMethodID@113, CallStaticObjectMethod@114, NewStringUTF@167,
+ * GetStringUTFChars@169, ReleaseStringUTFChars@170, ExceptionCheck@228,
+ * ExceptionClear@17, ExceptionOccurred@15, DeleteLocalRef@23.
+ * ------------------------------------------------------------------ */
+var JNI = null;
+
+function jniInit(envHandle) {
+  if (JNI && JNI.env.equals(envHandle)) {
+    return JNI;
+  }
+  var E = envHandle;
+  var table = Memory.readPointer(E);
+  var ps = Process.pointerSize;
+  function fn(slotIdx, ret, args) {
+    return new NativeFunction(Memory.readPointer(table.add(slotIdx * ps)),
+                              ret, args);
+  }
+  JNI = {
+    env: E,
+    FindClass: fn(6, 'pointer', ['pointer', 'pointer']),
+    GetObjectClass: fn(31, 'pointer', ['pointer', 'pointer']),
+    GetMethodID: fn(33, 'pointer',
+                    ['pointer', 'pointer', 'pointer', 'pointer']),
+    CallObjectMethod: fn(34, 'pointer',
+                         ['pointer', 'pointer', 'pointer']),
+    GetStaticMethodID: fn(113, 'pointer',
+                          ['pointer', 'pointer', 'pointer', 'pointer']),
+    CallStaticObjectMethod: fn(114, 'pointer',
+                               ['pointer', 'pointer', 'pointer', 'pointer',
+                                'int', 'pointer']),
+    NewStringUTF: fn(167, 'pointer', ['pointer', 'pointer']),
+    GetStringUTFChars: fn(169, 'pointer',
+                          ['pointer', 'pointer', 'pointer']),
+    ReleaseStringUTFChars: fn(170, 'void',
+                              ['pointer', 'pointer', 'pointer']),
+    ExceptionCheck: fn(228, 'int', ['pointer']),
+    ExceptionClear: fn(17, 'void', ['pointer']),
+    ExceptionOccurred: fn(15, 'pointer', ['pointer']),
+    DeleteLocalRef: fn(23, 'void', ['pointer', 'pointer'])
+  };
+  return JNI;
+}
+
+function exceptionName(J, alloc) {
+  try {
+    var thr = J.ExceptionOccurred(J.env);
+    if (thr.isNull()) {
+      J.ExceptionClear(J.env);
+      return '';
+    }
+    J.ExceptionClear(J.env);
+    var tcls = J.GetObjectClass(J.env, thr);
+    var mid = J.GetMethodID(J.env, tcls, alloc('getName'),
+                            alloc('()Ljava/lang/String;'));
+    var s = J.CallObjectMethod(J.env, thr, mid);
+    var name = '';
+    if (!s.isNull()) {
+      var p = J.GetStringUTFChars(J.env, s, ptr(0));
+      if (!p.isNull()) {
+        name = Memory.readCString(p);
+        J.ReleaseStringUTFChars(J.env, s, p);
+      }
+      J.DeleteLocalRef(J.env, s);
+    }
+    J.DeleteLocalRef(J.env, tcls);
+    J.DeleteLocalRef(J.env, thr);
+    return name;
+  } catch (e) {
+    try { J.ExceptionClear(J.env); } catch (ce) {}
+    return '';
+  }
 }
 
 function warmupInner(names) {
   var stats = { ok: 0, notfound: 0, fail: 0, errors: [] };
   var total = names.length;
-  var forName = null;
+  var J = null;
+  var forNameMID = null;
+  var clsClass = null;
   var loaders = [];
   try {
-    var ClassF = Java.use('java.lang.Class');
-    forName = ClassF.forName.overload('java.lang.String', 'boolean', 'java.lang.ClassLoader');
+    var env = Java.vm.getEnv();
+    J = jniInit(env.handle);
+    var alloc = function (s) { return Memory.allocUtf8String(s); };
+    clsClass = J.FindClass(J.env, alloc('java/lang/Class'));
+    if (clsClass.isNull()) {
+      throw new Error('FindClass(java/lang/Class) failed');
+    }
+    forNameMID = J.GetStaticMethodID(
+        J.env, clsClass, alloc('forName'),
+        alloc('(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;'));
+    if (forNameMID.isNull()) {
+      throw new Error('GetStaticMethodID(forName) failed');
+    }
     loaders = getLoaders();
+    J._alloc = alloc;
   } catch (e) {
     log('setup: ' + e);
     stats.errors.push('setup: ' + errText(e));
@@ -131,16 +230,24 @@ function warmupInner(names) {
     }
     var outcome = 'notfound';
     var reason = '';
+    var js = J.NewStringUTF(J.env, J._alloc(name));
     for (var li = 0; li < loaders.length; li++) {
-      var attempt;
-      try {
-        // initialize=true: <clinit> must run so native libs load and
-        // libexec's re-materialization gates actually fire
-        forName(name, true, loaders[li]);
+      var attempt = 'fail';
+      // initialize=true: <clinit> must run so native libs load and
+      // libexec's re-materialization gates actually fire
+      var r = J.CallStaticObjectMethod(J.env, clsClass, forNameMID,
+                                       js, 1, loaders[li]);
+      if (J.ExceptionCheck(J.env) === 0) {
         attempt = 'ok';
-      } catch (e) {
-        attempt = classifyError(e);
-        reason = errText(e);
+        if (!r.isNull()) {
+          J.DeleteLocalRef(J.env, r);
+        }
+      } else {
+        var exName = exceptionName(J, J._alloc);
+        reason = exName || 'exception';
+        attempt = (exName.indexOf('ClassNotFoundException') >= 0 ||
+                   exName.indexOf('NoClassDefFoundError') >= 0)
+                  ? 'notfound' : 'fail';
       }
       if (attempt === 'ok') {
         outcome = 'ok';
@@ -153,6 +260,7 @@ function warmupInner(names) {
       }
       outcome = attempt; // hard failure: remember it, still try next loader
     }
+    J.DeleteLocalRef(J.env, js);
     if (outcome === 'ok') {
       stats.ok++;
     } else if (outcome === 'notfound') {
