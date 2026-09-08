@@ -924,11 +924,28 @@ def main() -> int:
     try:
         mgr = frida.get_device_manager()
         device = mgr.add_remote_device(FRIDA_REMOTE)
-        pid = device.spawn([APP_ID])
     except Exception as e:
-        note(f"[!] frida spawn failed: {type(e).__name__}: {e} "
+        note(f"[!] frida device failed: {type(e).__name__}: {e} "
              f"(is frida-server listening on {FRIDA_REMOTE}?)")
         return 1
+    # spawn with cooldown + retries: after the matrix's rapid spawn/kill
+    # cycles AMS needs breathing room (run 34176663572: the capture spawn
+    # timed out right after 13 matrix levels - the app is fine, the
+    # launcher is just slow)
+    pid = None
+    for attempt in range(1, 4):
+        try:
+            pid = device.spawn([APP_ID])
+            break
+        except Exception as e:
+            note(f"[!] frida spawn failed (attempt {attempt}/3): "
+                 f"{type(e).__name__}: {e}")
+            if attempt == 3:
+                note("[!] spawn exhausted - aborting")
+                return 1
+            adb_shell(f"am force-stop {APP_ID}", 15)
+            note("[phase2] cooldown 25s before the retry")
+            time.sleep(25)
     note(f"[phase2] spawned {APP_ID} pid={pid} (gated)")
     try:
         session = device.attach(pid)
