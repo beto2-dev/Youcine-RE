@@ -876,49 +876,23 @@ def main() -> int:
         else:
             load_names.append((name, path))
 
-    # -- optional: detection-matrix probe BEFORE the capture pipeline -----
-    # Round 34175038958 (deep-stealth server): L0 spawn-gate ALIVE,
-    # L1 agent-presence ALIVE (the stealth patch defeated the memory
-    # scan!), L2 + 09's libc inline hooks DEAD - the packer detects the
-    # MODIFIED LIBC PROLOGUES (code-integrity check).  02/09 are dropped
-    # from the capture config; the matrix now tests each capture layer in
-    # ISOLATION and picks the guard set for the actual capture run:
-    #   candidate A (level 2) = 06+07+08+capture_aes_key, no guards
-    #   candidate B (level 3) = 06+07+08 without the crypto hooks
-    if PHASE2_MODE == "matrix":
-        matrix_results = probe_matrix(device=None, scripts_dir=scripts_dir)
-        (OUT / "matrix.json").write_text(
-            json.dumps(matrix_results, indent=2) + "\n", encoding="utf-8")
-        note(f"[phase2] matrix results: {json.dumps(matrix_results)}")
-
-        def _status(level: int) -> str:
-            for r in matrix_results:
-                if r.get("level") == level:
-                    return str(r.get("status") or "?")
-            return "?"
-
-        if _status(2) == "alive":
-            chosen_guards = ["capture_aes_key.js"]
-            note("[phase2] matrix verdict: candidate A (06+07+08+capture) "
-                 "survives - capture with the AES key hooks")
-        elif _status(3) == "alive":
-            chosen_guards = []
-            note("[phase2] matrix verdict: candidate B (06+07+08 without "
-                 "crypto hooks) survives - dropping capture_aes_key")
-        else:
-            chosen_guards = []
-            note("[!] matrix verdict: NO capture configuration survives - "
-                 "running the pipeline anyway for the evidence")
-        # rebuild the load list from the decided guards
-        load_names = []
-        for name in chosen_guards + phase2_names:
-            p = scripts_dir / name
-            if p.is_file():
-                load_names.append((name, p))
-            else:
-                note(f"[phase2] decided guard missing, skipping: {p}")
-        note(f"[phase2] capture-phase script list: "
-             f"{[n for n, _ in load_names]}")
+    # -- optional: detection-matrix diagnostics - runs AFTER the capture.
+    # ORDERING (run 34177018617): the matrix's ~13 rapid spawn/kill cycles
+    # trip AMS's crash-loop circuit breaker - the app is muted ('START'
+    # intents accepted, the process never forked, spawn TimedOut x3 even
+    # with 25s cooldowns).  The CAPTURE must run FIRST on a fresh boot
+    # (the first spawn always works); the matrix afterwards is pure
+    # diagnostics and may exhaust AMS without harming anything.
+    # The capture guard set comes from GUARD_SCRIPTS (the flow passes
+    # capture_aes_key.js only - proven safe by runs 34175381036/34175793717/
+    # 34176663572).
+    #
+    # History: rounds 34175381036/34175793717 - every ACTIVE interception
+    # of RegisterNatives is fatal (inline libart hook OR the vtable slot
+    # data swap); run 34176663572 - gate-time Java.perform/reflection is
+    # also fatal (init-window theory, probes L10/L11 dead, delayed-10s
+    # probe L12 alive); 06 is now pure-rpc observe-only and the whole
+    # candidate-A stack survives.
 
     # -- step 3: remote device, spawn gated, attach ----------------------
     try:
@@ -928,10 +902,8 @@ def main() -> int:
         note(f"[!] frida device failed: {type(e).__name__}: {e} "
              f"(is frida-server listening on {FRIDA_REMOTE}?)")
         return 1
-    # spawn with cooldown + retries: after the matrix's rapid spawn/kill
-    # cycles AMS needs breathing room (run 34176663572: the capture spawn
-    # timed out right after 13 matrix levels - the app is fine, the
-    # launcher is just slow)
+    # spawn with cooldown + retries: a slow/contended launcher is the
+    # normal case after heavy device activity (run 34176663572)
     pid = None
     for attempt in range(1, 4):
         try:
@@ -1142,6 +1114,22 @@ def main() -> int:
     note(f"[phase2] summary: {json.dumps(summary, ensure_ascii=False)}")
     note(f"[phase2] done in {summary['timeline_seconds']}s "
          f"(modules dumped in-proc: {sorted(DUMPED_MODULES)})")
+
+    # -- step 16b: detection-matrix diagnostics (AFTER the capture) -------
+    # Pure diagnostics: which instrumentation layer trips iJiami's death
+    # ladder (spawn-gate / agent / each script layer in isolation / the
+    # gate-time-Java probes).  Runs after the capture because the matrix
+    # mutes the app for AMS's crash-loop breaker (run 34177018617).
+    if PHASE2_MODE == "matrix":
+        try:
+            matrix_results = probe_matrix(device=None, scripts_dir=scripts_dir)
+            (OUT / "matrix.json").write_text(
+                json.dumps(matrix_results, indent=2) + "\n", encoding="utf-8")
+            alive = [r for r in matrix_results if r.get("status") == "alive"]
+            note(f"[phase2] matrix: {len(alive)}/{len(matrix_results)} "
+                 f"levels alive -> {json.dumps(matrix_results)}")
+        except Exception as e:
+            note(f"[!] matrix failed: {type(e).__name__}: {e}")
 
     # -- step 17: exit code ----------------------------------------------
     app_died_before_dump = DETACHED["flag"] and not DUMPS_DONE \
