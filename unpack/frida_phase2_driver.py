@@ -649,7 +649,12 @@ def run_warmup(warm_script, names: list[str]) -> dict:
     # materialized content lost with the process).  A snapshot every
     # WARMUP_CHECKPOINT_EVERY chunks keeps the capture crash-proof.
     checkpoint_every = _env_int("WARMUP_CHECKPOINT_EVERY", 20)
-    SWEEP_CHUNK = _env_int("WARMUP_SWEEP_CHUNK", 3)
+    # checkpoint 3 (12000 classes: all of classes.dex + part of classes2)
+    # = chunk 3*20 = 60 - chunk numbers, not checkpoint numbers (run
+    # 34192332593: SWEEP_CHUNK=3 never matched the modulo and the sweep
+    # never fired)
+    SWEEP_CHUNK = _env_int("WARMUP_SWEEP_CHUNK",
+                           3 * checkpoint_every)
     loaded_pre = rpc_watchdog(warm_script, "loadedcount", (),
                               "loadedcount (pre)", 120.0) \
         if not DETACHED["flag"] else None
