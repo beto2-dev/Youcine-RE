@@ -205,6 +205,8 @@ jobs:
             work/abi-info-phase2.txt
             work/apk-phase2.sha256
             work/pip-frida.log
+            work/stealth-server.log
+            work/stealth-client.log
             work/phase2-driver.exit
             work/system-build.prop
             work/vendor-build.prop

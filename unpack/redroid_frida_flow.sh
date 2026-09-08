@@ -362,8 +362,9 @@ xz -d -f work/fs.xz || {
 # finds no frida signature.  || true: a patcher failure degrades to the
 # stock binary and the capture continues.
 if [ -f tools/stealth_frida_server.py ]; then
-  python3 tools/stealth_frida_server.py work/fs \
+  python3 tools/stealth_frida_server.py work/fs --deep > work/stealth-server.log 2>&1 \
     || echo "::warning::stealth patch failed - using the stock frida-server"
+  tail -4 work/stealth-server.log || true
 else
   echo "::warning::tools/stealth_frida_server.py missing - stock frida-server"
 fi
@@ -425,6 +426,25 @@ python3 -c "import frida; print('frida python client:', frida.__version__)" || {
   echo "::error::python 'import frida' failed after pip install - see work/pip-frida.log"
   exit 1
 }
+# STEALTH the python client too: the client shares the wire-protocol
+# strings ('/re/frida/...', 're.frida...', the 'frida:rpc' shim it injects
+# with every script) with the server and the agent - all three sides must
+# be renamed IDENTICALLY or the protocol breaks.  Symbol sections
+# (PyInit__frida etc.) are protected by the patcher itself.
+FRIDA_CLIENT_SO="$(python3 - <<'PY'
+import frida, pathlib
+so = list(pathlib.Path(frida.__file__).parent.glob("_frida*.so"))
+print(so[0] if so else "")
+PY
+)"
+if [ -n "$FRIDA_CLIENT_SO" ] && [ -f "$FRIDA_CLIENT_SO" ] && [ -f tools/stealth_frida_server.py ]; then
+  python3 tools/stealth_frida_server.py "$FRIDA_CLIENT_SO" --deep >> work/stealth-client.log 2>&1 \
+    || echo "::warning::client stealth patch failed - see work/stealth-client.log"
+  python3 -c "import frida; print('client re-import after stealth patch: OK', frida.__version__)" \
+    || { echo "::error::frida client broken by the stealth patch - see work/stealth-client.log"; exit 1; }
+else
+  echo "::warning::could not locate the frida client .so - skipping its stealth patch"
+fi
 # reachability probe: enumerate_processes actually round-trips to the server
 python3 - <<'PY' 2>/dev/null || echo "::warning::frida remote 127.0.0.1:4789 not reachable - check work/adb-forwards.txt and /data/local/tmp/sv.log; the driver will fail"
 import frida
