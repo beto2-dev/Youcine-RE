@@ -45,6 +45,7 @@ RegisterNatives registrations (check frida-server port / anti-frida);
 """
 from __future__ import annotations
 
+import itertools
 import json
 import mmap
 import os
@@ -401,6 +402,10 @@ def on_message(message: dict, data: object) -> None:
     if mtype == "send":
         payload = message.get("payload")
         if isinstance(payload, dict):
+            # command-bus replies first (they carry their own routing)
+            if payload.get("t") == "reply" and "id" in payload:
+                _resolve_reply(payload)
+                return
             t = str(payload.get("type") or payload.get("t") or "")
             if t == "rn":
                 cls = str(payload.get("class"))
@@ -436,41 +441,66 @@ def on_message(message: dict, data: object) -> None:
 
 
 # ---------------------------------------------------------------------------
-# frida rpc helpers - every call wrapped, a failure never kills the pipeline
+# command bus: the frida rpc PEER channel is dead under the stealth patch
+# (runs 34177514528/34181159206: every script.exports call times out while
+# send()/post() script messages flow fine - the aes_key events keep
+# arriving).  All driver->script control now goes over the script message
+# channel: we post {t:'cmd', cmd, id, args} and the scripts reply with
+# {t:'reply', id, r} via send().
 # ---------------------------------------------------------------------------
-def rpc(script, name: str, *args):
-    exp = getattr(script, "exports", None)
-    if exp is None:
-        raise RuntimeError("script.exports unavailable (frida too old?)")
-    fn = getattr(exp, name, None)
-    if fn is None or not callable(fn):
-        raise RuntimeError(f"rpc export '{name}' missing")
-    return fn(*args)
+CMD_LOCK = threading.Lock()
+PENDING_CMDS: dict = {}
+CMD_SEQ = itertools.count(1)
+
+
+def _resolve_reply(payload: dict) -> bool:
+    cid = payload.get("id")
+    with CMD_LOCK:
+        box = PENDING_CMDS.pop(cid, None)
+    if box is None:
+        return False
+    box["val"] = payload.get("r")
+    box["event"].set()
+    return True
+
+
+def _post_cmd(script, name: str, args: tuple, timeout: float):
+    cid = next(CMD_SEQ)
+    box = {"event": threading.Event(), "val": None}
+    with CMD_LOCK:
+        PENDING_CMDS[cid] = box
+    try:
+        script.post({"t": "cmd", "cmd": name, "id": cid,
+                     "args": list(args)})
+    except Exception as e:  # noqa: BLE001
+        with CMD_LOCK:
+            PENDING_CMDS.pop(cid, None)
+        return None, f"post failed: {type(e).__name__}: {e}"
+    if not box["event"].wait(timeout):
+        with CMD_LOCK:
+            PENDING_CMDS.pop(cid, None)
+        return None, "timeout"
+    val = box["val"]
+    if isinstance(val, dict) and "__err" in val:
+        return None, str(val["__err"])
+    return val, None
 
 
 def rpc_watchdog(script, name: str, args: tuple, desc: str, timeout: float = 300.0):
-    """frida rpc has no timeout of its own - run the call in a daemon
-    thread and move on after `timeout` seconds (the call may still
-    complete in the background).  A stuck script thread blocks all LATER
-    rpc calls on that script, so callers decide whether to keep going."""
-    box = {}
-
-    def _run():
-        try:
-            box["result"] = ("ok", rpc(script, name, *args))
-        except Exception as e:  # noqa: BLE001 - log everything, never die
-            box["result"] = ("err", f"{type(e).__name__}: {e}")
-
-    th = threading.Thread(target=_run, daemon=True, name=f"rpc-{name}")
-    th.start()
-    th.join(timeout)
-    if th.is_alive():
-        note(f"[!] watchdog: {desc} exceeded {timeout:.0f}s - continuing "
-             f"(the call may still complete in the background)")
+    """Post a command to the script and wait `timeout` seconds for its
+    reply message (see the command-bus note above - the classic rpc
+    exports are NOT used).  Returns the value, or None on timeout/error
+    (already noted)."""
+    try:
+        val, err = _post_cmd(script, name, args, timeout)
+    except Exception as e:  # noqa: BLE001
+        note(f"[!] {desc} command bus failed: {type(e).__name__}: {e}")
         return None
-    status, val = box["result"]
-    if status != "ok":
-        note(f"[!] {desc} failed: {val}")
+    if err == "timeout":
+        note(f"[!] watchdog: {desc} exceeded {timeout:.0f}s - continuing")
+        return None
+    if err:
+        note(f"[!] {desc} failed: {err}")
         return None
     return val
 
@@ -1013,13 +1043,11 @@ def main() -> int:
     # post-hoc Java reflection sweep over the loaded classes once the
     # warm-up has materialized them, so the table is read AFTER the sweep.
     if rn_script is not None and names:
-        sweep_rpc = getattr(rn_script.exports, "sweep", None)
-        if sweep_rpc is not None:
-            remaining = max(1, int(DEADLINE - time.time()))
-            r = rpc_watchdog(rn_script, "sweep",
-                             (min(300000, remaining * 1000),),
-                             "rn sweep (post-warm-up)", 600.0)
-            note(f"[phase2] rn sweep result: {r}")
+        remaining = max(1, int(DEADLINE - time.time()))
+        r = rpc_watchdog(rn_script, "sweep",
+                         (min(300000, remaining * 1000),),
+                         "rn sweep (post-warm-up)", 600.0)
+        note(f"[phase2] rn sweep result: {r}")
 
     # -- step 10: post-warm-up quiet-window (new registrations expected
     # as libexec re-materializes classes) --------------------------------

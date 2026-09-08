@@ -231,3 +231,34 @@ rpc.exports = {
     return n;
   }
 };
+
+/* ---------------------------------------------------------------------------
+ * command bus (runs 34177514528/34181159206): the frida rpc PEER channel
+ * is dead under the stealth patch - every script.exports call from the
+ * driver times out while send()/post() script messages flow fine.  The
+ * driver now posts {t:'cmd', cmd, id, args} and this dispatcher routes it
+ * through the local rpc.exports table and replies {t:'reply', id, r}.
+ * recv() is one-shot: re-arm after every message.
+ * ------------------------------------------------------------------------- */
+(function () {
+  function listen() {
+    recv(function (msg) {
+      try {
+        if (msg && msg.t === 'cmd' && msg.id !== undefined) {
+          var fn = rpc.exports && rpc.exports[msg.cmd];
+          var r;
+          try {
+            r = (typeof fn === 'function') ?
+                fn.apply(null, msg.args || []) :
+                { __err: 'no such cmd: ' + msg.cmd };
+          } catch (e) {
+            r = { __err: String(e) };
+          }
+          send({ t: 'reply', id: msg.id, r: r });
+        }
+      } catch (e) { /* never crash the script */ }
+      listen();
+    });
+  }
+  listen();
+})();

@@ -584,7 +584,7 @@ DRIVER_RC=0
 # hooks / libart hooks / full config) before the capture pipeline runs.
 ANDROID_SERIAL="$DEV" APP_ID="$APP_ID" FRIDA_REMOTE="127.0.0.1:4789" \
   DEX_DIR="work/dumps-dex" OUT_DIR="work/phase2" \
-  GUARD_SCRIPTS="$PHASE2_GUARDS" PHASE2_MODE="matrix" \
+  GUARD_SCRIPTS="$PHASE2_GUARDS" PHASE2_MODE="matrix" PHASE2_TIMEOUT="1800" \
   python3 unpack/frida_phase2_driver.py || DRIVER_RC=$?
 echo "phase-2 driver exit code: $DRIVER_RC"
 echo "$DRIVER_RC" > work/phase2-driver.exit || true
