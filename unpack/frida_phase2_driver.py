@@ -117,6 +117,56 @@ def on_detached(reason: str, *args) -> None:
          f"out-of-proc dump will still be attempted)")
 
 
+def reload_scripts(session, load_names):
+    """(Re)load every guard + phase-2 script into a session with the single
+    message handler.  Used for the initial load and for re-attaches."""
+    scripts = {}
+    for name, path in load_names:
+        try:
+            source = path.read_text(encoding="utf-8")
+            s = session.create_script(source)
+            s.on("message", on_message)
+            s.load()
+            scripts[name] = s
+            note(f"[phase2] loaded {name}")
+        except Exception as e:
+            note(f"[!] loading {name} failed: {e}")
+    return scripts
+
+
+def try_reattach(device, load_names, old_session, old_scripts, reattaches):
+    """iJiami's death ladder can SIGKILL the instrumented process ~1s after
+    resume (run 34171467849: pid 3480 killed, AMS restarted the app at 3512
+    uninstrumented and the whole capture was lost).  If the session died but
+    the app is alive at a NEW pid, attach there and re-load every script:
+    late/lazy RegisterNatives, the warm-up sweep, module dumps and the AES
+    key hooks all still work on the restarted instance."""
+    new_pid = pidof(APP_ID)
+    if new_pid is None:
+        note("[phase2] re-attach skipped: app is dead")
+        return old_session, old_scripts, None, None, None, reattaches
+    try:
+        new_session = device.attach(new_pid)
+    except Exception as e:
+        note(f"[!] re-attach to restarted pid {new_pid} failed: {e}")
+        return old_session, old_scripts, None, None, None, reattaches
+    new_session.on("detached", on_detached)
+    new_scripts = reload_scripts(new_session, load_names)
+    if not new_scripts:
+        note("[!] re-attach produced no scripts - capture is over")
+        return old_session, old_scripts, None, None, None, reattaches
+    DETACHED["flag"] = False
+    DETACHED["reason"] = ""
+    reattaches += 1
+    note(f"[phase2] RE-ATTACHED to restarted pid {new_pid} "
+         f"(attempt {reattaches}) - all scripts reloaded")
+    return (new_session, new_scripts,
+            new_scripts.get("06_register_natives_table.js"),
+            new_scripts.get("07_class_warmup.js"),
+            new_scripts.get("08_redump_dex.js"),
+            reattaches)
+
+
 def merge_rn(cls: str, methods) -> None:
     """Accumulate RegisterNatives rows; dedup by (name, sig) keeping the
     LATEST fn - libexec re-registers methods as classes re-materialize."""
@@ -154,6 +204,7 @@ def on_message(message: dict, data: object) -> None:
                      f"ok={payload.get('ok')} notfound={payload.get('notfound')} "
                      f"fail={payload.get('fail')}")
             elif (t == "rn_warn" or t == "dexcensus" or t == "aes_key"
+                    or t == "kill_block" or t == "hidefrida"
                     or t.startswith("redump_")):
                 note("[js] " + json.dumps(payload, ensure_ascii=False)[:200])
             else:
@@ -630,18 +681,7 @@ def main() -> int:
     session.on("detached", on_detached)
 
     # -- step 4: load every script with the single message handler -------
-    scripts = {}
-    for name, path in load_names:
-        try:
-            source = path.read_text(encoding="utf-8")
-            s = session.create_script(source)
-            s.on("message", on_message)
-            s.load()
-            scripts[name] = s
-            note(f"[phase2] loaded {name}")
-        except Exception as e:
-            note(f"[!] loading {name} failed: {e}"
-                 + ("" if name in guard_names else " (pipeline degraded)"))
+    scripts = reload_scripts(session, load_names)
     if not scripts:
         note("[!] no frida script could be loaded - aborting")
         return 1
@@ -650,13 +690,30 @@ def main() -> int:
     redump_script = scripts.get("08_redump_dex.js")
 
     # -- step 5: resume + settle (app boot) ------------------------------
+    reattaches = 0
+    max_reattach = _env_int("MAX_REATTACH", 2)
     try:
         device.resume(pid)
         note(f"[phase2] resumed pid={pid}; settling {SETTLE}s for app boot")
     except Exception as e:
         note(f"[!] resume failed: {e} (continuing - the app may self-start)")
-    time.sleep(SETTLE)
-    note(f"[phase2] settle done; app pid={pidof(APP_ID)}")
+    # sub-second settle poll: the death ladder can kill the gated process
+    # ~1s after resume (run 34171467849) - reacting fast lets the re-attach
+    # land on the AMS-restarted instance while packer init is still running
+    settle_start = time.time()
+    while time.time() - settle_start < SETTLE:
+        if DETACHED["flag"]:
+            break
+        time.sleep(0.5)
+    note(f"[phase2] settle done; app pid={pidof(APP_ID)}"
+         + (f" (detached: {DETACHED['reason']})" if DETACHED["flag"] else ""))
+
+    # checkpoint 1: re-attach if the gated process was killed and AMS
+    # restarted the app (fresh instance runs the packer init again)
+    if DETACHED["flag"] and reattaches < max_reattach \
+            and not out_of_budget("re-attach 1"):
+        session, scripts, rn_script, warm_script, redump_script, reattaches = \
+            try_reattach(device, load_names, session, scripts, reattaches)
 
     # -- step 6: pre-warm-up RegisterNatives quiet-window ----------------
     quiet_cap = max(1, PHASE2_TIMEOUT // 3)
@@ -682,6 +739,14 @@ def main() -> int:
     if not names:
         note("[!] empty warm-up list - the sweep will be skipped "
              "(check DEX_DIR contents)")
+
+    # checkpoint 2: the death ladder may fire again mid-pipeline (second
+    # kill of the re-attached instance) - re-attach once more before the
+    # warm-up sweep, the most valuable capture step
+    if DETACHED["flag"] and reattaches < max_reattach \
+            and not out_of_budget("re-attach 2"):
+        session, scripts, rn_script, warm_script, redump_script, reattaches = \
+            try_reattach(device, load_names, session, scripts, reattaches)
 
     # -- step 9: warm-up sweep -------------------------------------------
     if warm_script is not None and names:
@@ -781,6 +846,7 @@ def main() -> int:
         "redump_dex_count": redump_dex_count,
         "inproc_modules": inproc_modules,
         "app_alive": app_alive,
+        "reattaches": reattaches,
         "timeline_seconds": round(time.time() - START, 1),
     }
     (OUT / "summary.json").write_text(
