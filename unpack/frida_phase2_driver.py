@@ -167,7 +167,7 @@ MATRIX_LEVELS = [
     (3, "agent + 06+07+08 (capture stack without the AES hooks)",
      ["06_register_natives_table.js", "07_class_warmup.js",
       "08_redump_dex.js"]),
-    (4, "agent + 06 only (observe-only reflection sweep)",
+    (4, "agent + 06 only (pure-rpc observe sweep)",
      ["06_register_natives_table.js"]),
     (5, "agent + 07 only (rpc warm-up, no hooks)",
      ["07_class_warmup.js"]),
@@ -175,11 +175,52 @@ MATRIX_LEVELS = [
      ["08_redump_dex.js"]),
     (7, "agent + capture_aes_key only (libcrypto inline hooks)",
      ["capture_aes_key.js"]),
-    (8, "agent + 02 only (ptrace replace - known suspect)",
+    (8, "agent + 02 only (ptrace replace)",
      ["02_bypass_ptrace.js"]),
     (9, "agent + 09 only (libc inline hooks - KNOWN KILLER)",
      ["09_hide_frida.js"]),
+    (10, "@probe: Java.perform at the gate (init-window theory)",
+     ["@probe-java-gate"]),
+    (11, "@probe: reflection at the gate (init-window theory)",
+     ["@probe-reflect-gate"]),
+    (12, "@probe: reflection DELAYED 10s (after the init window)",
+     ["@probe-reflect-delayed"]),
 ]
+
+# inline probe scripts for the matrix (theory: the packer's init window
+# kills ANY agent-side Java activity; everything must be deferred)
+PROBE_SCRIPTS = {
+    "@probe-java-gate": """'use strict';
+console.log('[probe] gate-time Java.perform...');
+Java.perform(function () {
+  try {
+    Java.use('java.lang.Class');
+    console.log('[probe] gate Java.perform OK');
+  } catch (e) { console.log('[probe] ' + e); }
+});
+""",
+    "@probe-reflect-gate": """'use strict';
+console.log('[probe] gate-time reflection...');
+Java.perform(function () {
+  try {
+    var ms = Java.use('android.util.Log').class.getDeclaredMethods();
+    console.log('[probe] gate reflection OK: ' + ms.length + ' methods');
+  } catch (e) { console.log('[probe] ' + e); }
+});
+""",
+    "@probe-reflect-delayed": """'use strict';
+console.log('[probe] reflection deferred by 10s');
+setTimeout(function () {
+  try {
+    Java.perform(function () {
+      var ms = Java.use('android.util.Log').class.getDeclaredMethods();
+      console.log('[probe] delayed reflection OK: ' + ms.length + ' methods');
+      send({ type: 'probe_reflect_ok', methods: ms.length });
+    });
+  } catch (e) { console.log('[probe] ' + e); }
+}, 10000);
+""",
+}
 
 
 def probe_matrix(device, scripts_dir) -> list:
@@ -212,6 +253,7 @@ def probe_matrix(device, scripts_dir) -> list:
             continue
         session = None
         detached = {"flag": False}
+        level_wait = PROBE_WAIT
         if level >= 1:
             try:
                 session = device.attach(pid)
@@ -220,8 +262,15 @@ def probe_matrix(device, scripts_dir) -> list:
                     _d["flag"] = True
                 session.on("detached", _on_det)
                 for name in script_names:
-                    source = EMPTY_SCRIPT if name == "@empty" else \
-                        (scripts_dir / name).read_text(encoding="utf-8")
+                    if name == "@empty":
+                        source = EMPTY_SCRIPT
+                    elif name in PROBE_SCRIPTS:
+                        source = PROBE_SCRIPTS[name]
+                        if name == "@probe-reflect-delayed":
+                            level_wait = PROBE_WAIT + 8  # see the callback
+                    else:
+                        source = (scripts_dir / name).read_text(
+                            encoding="utf-8")
                     s = session.create_script(source)
                     s.on("message", on_message)
                     s.load()
@@ -237,8 +286,8 @@ def probe_matrix(device, scripts_dir) -> list:
             device.resume(pid)
         except Exception as e:
             entry["status"] = f"resume-failed: {e}"
-        # watch the level for PROBE_WAIT seconds
-        while time.time() - t0 < PROBE_WAIT:
+        # watch the level for level_wait seconds
+        while time.time() - t0 < level_wait:
             if detached["flag"]:
                 break
             time.sleep(0.5)

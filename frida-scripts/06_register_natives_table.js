@@ -236,13 +236,22 @@ function fnOf(m) {
 }
 
 /* The sweep: enumerate loaded classes, record every native method.
- * Pure reads + reflection - nothing is modified anywhere. */
+ * Pure reads + reflection - nothing is modified anywhere.  Runs ONLY when
+ * the driver invokes it (post-warm-up); the offset discovery happens on
+ * the first sweep call, never at script load. */
 function sweep(budgetMs) {
   if (swept) {
     return 'already';
   }
   swept = true;
   var t0 = Date.now();
+  Java.perform(function () {
+    try {
+      discoverOffsets();
+    } catch (e) {
+      log('discoverOffsets: ' + e);
+    }
+  });
   var classes = [];
   try {
     classes = Java.enumerateLoadedClassesSync();
@@ -321,15 +330,16 @@ function activate() {
     return;
   }
   activated = true;
+  // NOTE (matrix runs 34175793717/34176267014): NO Java.perform here, no
+  // reflection, nothing at load time.  The packer's init window (the
+  // first ~2.5s after resume) detects ANY agent-side Java activity -
+  // even Java.use('android.util.Log') + getDeclaredMethods at the gate
+  // kills the process (L4 dead), while the empty script stays alive.
+  // Every Java operation (offset discovery included) is deferred to the
+  // driver-triggered sweep() that runs post-warm-up, minutes after the
+  // packer finished its boot.
   log('active in ' + cmdline() + ' pid=' + Process.id +
-      ' (observe-only: nothing is hooked, nothing is modified)');
-  Java.perform(function () {
-    try {
-      discoverOffsets();
-    } catch (e) {
-      log('discoverOffsets: ' + e);
-    }
-  });
+      ' (pure-rpc: no load-time Java, nothing modified)');
 }
 
 setImmediate(function () {
