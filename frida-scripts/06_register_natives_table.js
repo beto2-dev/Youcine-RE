@@ -1,5 +1,5 @@
 /*
- * Youcine-RE - phase 2: capture the COMPLETE RegisterNatives table.
+ * Youcine-RE - phase 2: capture the RegisterNatives table, OBSERVE-ONLY.
  * Run against the ORIGINAL packed APK (the content-gated engine only
  * registers on the byte-exact original - run 34133100459 is the proven
  * environment: native-arm64 redroid + original APK).
@@ -9,47 +9,53 @@
  * implementations ONLY at runtime from libexec.so's content-gated engine.
  * The packer-free rebuild v5 executes every non-protected layer and then
  * dies at the first VMP-protected method (App.onCreate:139 -> Aria.init ->
- * SqlHelper.getDb, runs 34166188171 / 34166250339): removing the packer
+ * SqlHelper.getDb, runs 34166188171/34166250339): removing the packer
  * removed the only registrar.  This script records
- * class -> {name, signature, fnPtr(module+offset)} for every
- * RegisterNatives call, so the later de-natify bridge can map each native
- * back to its Java-visible declaration (open-source families get Java
- * bodies; the vendor's 424 need a registrar shim).
+ * class -> {name, signature, fnPtr(module+offset)} for every registered
+ * native, so the later de-natify bridge can map each native back to its
+ * Java-visible declaration.
  *
- * HOW (run 34175381036 matrix verdict): Interceptor.attach on the
- * art::JNI::RegisterNatives function body - via symbol scan OR via the
- * vtable-resolved address - is an INLINE CODE PATCH on libart.so and
- * iJiami's VMP integrity-checks libart's code and kills the process
- * (L4: agent+06 = dead; agent alone = alive).  libart's CODE is never
- * touched here: the shared JNINativeInterface function table (reachable
- * as *env, i.e. the first field of any JNIEnv) has RegisterNatives at
- * slot 215 (JNI spec table, 0-based, 4 reserved -> GetVersion@4 ->
- * ... -> RegisterNatives@215 -> GetObjectRefType@232).  We copy nothing
- * and patch nothing in code - we mprotect the ONE table slot writable
- * and swap the function POINTER for a NativeCallback that parses the
- * JNINativeMethod array, records it, and forwards to the original.
- * That is a pure DATA modification - invisible to the prologue checksum
- * the packer runs on executable pages.
+ * HOW (matrix runs 34175381036 / 34175793717 verdict): EVERY active
+ * interception of RegisterNatives is detected by iJiami's VMP -
+ *   * Interceptor.attach on the art::JNI::RegisterNatives body (inline
+ *     code patch on libart) -> process killed,
+ *   * swapping JNINativeInterface slot 215 (a pure DATA patch) -> the
+ *     packer refuses to run Application attach and the process dies on a
+ *     provider-install NPE.
+ * BUT the app fully boots with the agent injected (matrix L1: alive) -
+ * the registrations DO happen, we only need to OBSERVE them afterwards.
+ * So this script modifies NOTHING: after the app boots (driver triggers
+ * the sweep post-warm-up), Java reflection enumerates the loaded
+ * classes, records every native-declared method, and reads the JNI
+ * entry point best-effort:
+ *   layer 1: the Method object's hidden artMethod field (offset found
+ *            empirically from a known framework native - a pointer slot
+ *            whose target looks like an ArtMethod),
+ *   layer 2: the ArtMethod's entry-point slot (offset found the same
+ *            way: a pointer landing inside a known executable module).
+ * Reads are never detectable; offsets are validated on two known
+ * framework natives before use and silently disabled on mismatch.
  *
- * The JNINativeMethod array (arg 2) is {const char* name; const char*
- * signature; void* fnPtr} - 3 pointers per entry, count in arg 3.  libexec
- * may RE-register methods as classes re-materialize, so the table keeps
- * the LATEST fnPtr per (class, name, signature).
- *
- * Style follows 01_unpack_ijiami_dex.js: /proc/self/cmdline target gating
- * with activation retry, 'use strict', and total try/catch discipline - a
- * failing hook must never crash the packed process (one shot per run).
+ * Style follows 01_unpack_ijiami_dex.js: /proc/self/cmdline target gating,
+ * 'use strict', and total try/catch discipline.
  */
 'use strict';
 
 var TARGET = 'com.world.youcinemobile';
 var activated = false;
-var SLOT = 215;      // JNINativeInterface.RegisterNatives
+var swept = false;
 
-// className -> { 'name|sig' -> rec } (plain objects: ES5-safe + JSON-able;
-// Map would break ancient duktape-based frida runtimes)
+// className -> { 'name|sig' -> rec }
 var RN = {};
-var JClass = null; // cached java.lang.Class wrapper for name casts
+
+// empirically discovered offsets (0 = not found yet / -1 = unavailable)
+var OFF_ARTMETHOD = 0;   // Method object -> artMethod pointer slot
+var OFF_ENTRY = 0;       // ArtMethod -> entry_point_from_jni_ slot
+
+var PRIM = {
+  void: 'V', boolean: 'Z', byte: 'B', char: 'C', short: 'S',
+  int: 'I', long: 'J', float: 'F', double: 'D'
+};
 
 function log(msg) {
   console.log('[rn] ' + msg);
@@ -77,8 +83,6 @@ function record(className, rec) {
     bucket = {};
     RN[className] = bucket;
   }
-  // dedup by class+name+sig; the plain-object assignment keeps the LATEST
-  // fn (libexec re-registers as classes re-materialize)
   bucket[rec.name + '|' + rec.sig] = rec;
 }
 
@@ -94,113 +98,219 @@ function totalMethods() {
   return n;
 }
 
-/* Parse + record a JNINativeMethod array; runs INSIDE our replacement
- * callback, on the REGISTERING thread (which is JNI-attached by
- * definition - it is calling a JNI function right now), so Java.cast on
- * the jclass is legal.  Returns the row records for the send() event. */
-function parseMethods(env, jclass, methods, count) {
-  var recs = [];
-  var className = 'jclass@' + jclass;
+function typeSig(name) {
+  if (PRIM[name]) {
+    return PRIM[name];
+  }
+  if (name.charAt(0) === '[') {
+    return name.replace(/\./g, '/');       // already array-ish
+  }
+  return 'L' + name.replace(/\./g, '/') + ';';
+}
+
+function sigOf(m) {
   try {
-    className = String(Java.cast(jclass, JClass).getName());
-  } catch (ce) {
-    // Java bridge not ready / not a Class yet: keep the raw form
+    var pt = m.getParameterTypes();
+    var s = '(';
+    for (var i = 0; i < pt.length; i++) {
+      s += typeSig(String(pt[i].getName()));
+    }
+    s += ')';
+    s += typeSig(String(m.getReturnType().getName()));
+    return s;
+  } catch (e) {
+    return '?';
   }
-  // sanity: a garbage count means a garbage pointer - never touch it
-  if (!(count > 0 && count <= 10000)) {
-    log('skipping count=' + count + ' class=' + className);
-    return recs;
+}
+
+/* pointer at obj+offset that lands in an executable module (or null) */
+function ptrInModuleAt(obj, off) {
+  try {
+    var p = Memory.readPointer(obj.add(off));
+    if (p.isNull()) {
+      return null;
+    }
+    var mod = Process.findModuleByAddress(p);
+    if (mod) {
+      return p;
+    }
+  } catch (e) {}
+  return null;
+}
+
+/* Discover OFF_ARTMETHOD and OFF_ENTRY from known framework natives.
+ * android.util.Log has native methods registered by
+ * libandroid_runtime.so at boot - their entry points live there. */
+function discoverOffsets() {
+  try {
+    var Log = Java.use('android.util.Log').class;
+    var methods = Log.getDeclaredMethods();
+    var samples = [];
+    for (var i = 0; i < methods.length && samples.length < 2; i++) {
+      var m = methods[i];
+      if ((m.getModifiers() & 0x100) !== 0) {   // Modifier.NATIVE
+        samples.push(m);
+      }
+    }
+    if (samples.length === 0) {
+      log('offset discovery: no framework native sample - fn reads off');
+      OFF_ARTMETHOD = -1;
+      OFF_ENTRY = -1;
+      return;
+    }
+    // layer 1: scan the Method object for a plausible ArtMethod pointer:
+    // an aligned slot whose target (small struct) itself contains a
+    // pointer into an executable module within the first 0x30 bytes.
+    var artField = -1, entryOff = -1;
+    for (var off = 8; off <= 0x38; off += 4) {
+      var ok = 0;
+      for (var s = 0; s < samples.length; s++) {
+        var h = samples[s].$handle;
+        if (!h) { continue; }
+        var cand = ptrInModuleAt(h, off);
+        if (cand) { continue; }        // the artMethod slot must NOT be a
+                                       // code pointer itself (it points to
+                                       // an ArtMethod struct)
+        try {
+          var p = Memory.readPointer(h.add(off));
+          if (p.isNull()) { continue; }
+          for (var eo = 8; eo <= 0x28; eo += 4) {
+            if (ptrInModuleAt(p, eo)) {
+              ok++;
+              break;
+            }
+          }
+        } catch (e) {}
+      }
+      if (ok === samples.length) {
+        artField = off;
+        break;
+      }
+    }
+    if (artField < 0) {
+      log('offset discovery: artMethod slot not found - fn reads off');
+      OFF_ARTMETHOD = -1;
+      OFF_ENTRY = -1;
+      return;
+    }
+    // layer 2: inside one sample's ArtMethod, find the entry-point slot
+    var h0 = samples[0].$handle;
+    var am = Memory.readPointer(h0.add(artField));
+    for (var eo = 8; eo <= 0x28; eo += 4) {
+      if (ptrInModuleAt(am, eo)) {
+        entryOff = eo;
+        break;
+      }
+    }
+    OFF_ARTMETHOD = artField;
+    OFF_ENTRY = entryOff;
+    log('offset discovery: Method+0x' + off0hex(artField) +
+        ' -> ArtMethod, entry+0x' + off0hex(entryOff < 0 ? 0 : entryOff) +
+        (entryOff < 0 ? ' (entry not found - fn will be ?)' : ''));
+  } catch (e) {
+    log('offset discovery failed: ' + e);
+    OFF_ARTMETHOD = -1;
+    OFF_ENTRY = -1;
   }
-  var ps = Process.pointerSize;
-  for (var i = 0; i < count; i++) {
+}
+
+function off0hex(n) {
+  return n.toString(16);
+}
+
+function fnOf(m) {
+  if (OFF_ARTMETHOD <= 0 || OFF_ENTRY <= 0) {
+    return null;
+  }
+  try {
+    var h = m.$handle;
+    if (!h) { return null; }
+    var am = Memory.readPointer(h.add(OFF_ARTMETHOD));
+    if (am.isNull()) { return null; }
+    var fn = Memory.readPointer(am.add(OFF_ENTRY));
+    if (fn.isNull()) { return null; }
+    return fn;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* The sweep: enumerate loaded classes, record every native method.
+ * Pure reads + reflection - nothing is modified anywhere. */
+function sweep(budgetMs) {
+  if (swept) {
+    return 'already';
+  }
+  swept = true;
+  var t0 = Date.now();
+  var classes = [];
+  try {
+    classes = Java.enumerateLoadedClassesSync();
+  } catch (e) {
+    log('enumerateLoadedClasses failed: ' + e);
+    return 'error';
+  }
+  log('sweep: ' + classes.length + ' loaded classes');
+  var budget = budgetMs || 300000;
+  var seen = 0;
+  for (var ci = 0; ci < classes.length; ci++) {
+    if (Date.now() - t0 > budget) {
+      log('sweep: budget exhausted at class ' + ci + '/' + classes.length);
+      break;
+    }
+    var name = classes[ci];
+    var cls = null;
     try {
-      var base = methods.add(i * 3 * ps);
-      var namePtr = base.readPointer();
-      var sigPtr = base.add(ps).readPointer();
-      var fnPtr = base.add(2 * ps).readPointer();
-      if (namePtr.isNull() || sigPtr.isNull() || fnPtr.isNull()) {
-        continue;
-      }
-      var name = namePtr.readCString();
-      var sig = sigPtr.readCString();
-      if (name === null || sig === null) {
-        continue;
-      }
-      var mod = Process.findModuleByAddress(fnPtr);
-      var rec = {
-        name: name,
-        sig: sig,
-        fn: String(fnPtr),
-        mod: mod ? mod.name : '<anon>',
-        off: mod ? '0x' + fnPtr.sub(mod.base).toString(16) : '?'
-      };
-      record(className, rec);
-      recs.push(rec);
+      cls = Java.use(name).class;
     } catch (e) {
-      // one bad row must not kill the remaining count-1 rows
+      continue;               // not loadable from this classloader set
+    }
+    try {
+      var methods = cls.getDeclaredMethods();
+      for (var i = 0; i < methods.length; i++) {
+        var m = methods[i];
+        var mods;
+        try {
+          mods = m.getModifiers();
+        } catch (e) {
+          continue;
+        }
+        if ((mods & 0x100) === 0) {
+          continue;           // not native
+        }
+        var mname;
+        try {
+          mname = String(m.getName());
+        } catch (e) {
+          continue;
+        }
+        var rec = {
+          name: mname,
+          sig: sigOf(m),
+          fn: '?',
+          mod: '<unknown>',
+          off: '?'
+        };
+        var fn = fnOf(m);
+        if (fn) {
+          var mod = Process.findModuleByAddress(fn);
+          rec.fn = String(fn);
+          rec.mod = mod ? mod.name : '<anon>';
+          rec.off = mod ? '0x' + fn.sub(mod.base).toString(16) : '?';
+        }
+        record(name, rec);
+      }
+      seen++;
+    } catch (e) {
+      // one class must not kill the sweep
     }
   }
-  send({ type: 'rn', class: className, count: count, methods: recs });
-  return recs;
-}
-
-/* Swap JNINativeInterface slot 215 for our NativeCallback.  The table is
- * SHARED by every JNIEnv of the VM, so one swap covers all threads. */
-function patchVtableSlot() {
-  var env = Java.vm.getEnv();
-  var ps = Process.pointerSize;
-  var table = env.handle.readPointer();      // *env == JNINativeInterface*
-  var slotAddr = table.add(SLOT * ps);
-  var original = slotAddr.readPointer();
-  if (original.isNull()) {
-    throw new Error('slot ' + SLOT + ' is NULL');
-  }
-  var forward = new NativeFunction(
-    original, 'int', ['pointer', 'pointer', 'pointer', 'int']);
-  Memory.protect(slotAddr, ps, 'rw-');
-  slotAddr.writePointer(new NativeCallback(
-    function (jniEnv, jclass, methods, n) {
-      var ret = 0;
-      try {
-        var count = n;
-        try {
-          count = n.toInt32();
-        } catch (te) {
-          /* older runtimes pass a raw number */
-        }
-        parseMethods(jniEnv, jclass, methods, count);
-      } catch (e) {
-        // NEVER crash the registering thread
-        try { log('callback: ' + e); } catch (le) {}
-      }
-      try {
-        ret = forward(jniEnv, jclass, methods, n);
-        if (ret !== 0) {
-          send({ type: 'rn_warn', ret: ret, via: 'vtable[215]' });
-        }
-      } catch (e) {
-        try { log('forward: ' + e); } catch (le) {}
-      }
-      return ret;
-    },
-    'int', ['pointer', 'pointer', 'pointer', 'int']));
-  log('vtable slot ' + SLOT + ' swapped: original ' + original +
-      ' -> callback (libart code untouched)');
-  return true;
-}
-
-function installHooks() {
-  var ok = false;
-  try {
-    ok = patchVtableSlot();
-  } catch (e) {
-    log('vtable slot swap failed: ' + e);
-  }
-  try {
-    send({ type: 'rn_ready', hooked: ok ? 1 : 0, mode: 'vtable-slot' });
-  } catch (se) {}
-  log('installHooks: ' + (ok ? 'RegisterNatives capture live (data-only)' :
-      'FAILED'));
+  var total = totalMethods();
+  log('sweep done: ' + seen + ' classes visited, ' + total +
+      ' native methods recorded in ' + (Date.now() - t0) + 'ms');
+  send({ type: 'rn_swept', classes_seen: seen, native_methods: total,
+         ms: Date.now() - t0 });
+  return 'ok';
 }
 
 function activate() {
@@ -211,17 +321,13 @@ function activate() {
     return;
   }
   activated = true;
-  log('active in ' + cmdline() + ' pid=' + Process.id);
+  log('active in ' + cmdline() + ' pid=' + Process.id +
+      ' (observe-only: nothing is hooked, nothing is modified)');
   Java.perform(function () {
     try {
-      JClass = Java.use('java.lang.Class');
+      discoverOffsets();
     } catch (e) {
-      log('java.lang.Class unavailable: ' + e);
-    }
-    try {
-      installHooks();
-    } catch (e) {
-      log('installHooks: ' + e);
+      log('discoverOffsets: ' + e);
     }
   });
 }
@@ -234,20 +340,18 @@ setImmediate(function () {
   }
 });
 
-// late re-arm: the gate runs before the app's classloader exists; if the
-// first attempt failed for timing reasons try once more after 10s
-setTimeout(function () {
-  try {
-    if (!activated) {
-      activate();
-    }
-  } catch (e) {
-    log('re-arm: ' + e);
-  }
-}, 10000);
-
-/* rpc surface consumed by unpack/frida_phase2_driver.py */
+/* rpc surface consumed by unpack/frida_phase2_driver.py:
+ *  sweep(budgetMs) - run the post-hoc enumeration (call AFTER warm-up!)
+ *  count/classes/table - same contract as the hooked version
+ */
 rpc.exports = {
+  sweep: function (budgetMs) {
+    var r = 'error';
+    Java.perform(function () {
+      r = sweep(budgetMs);
+    });
+    return r;
+  },
   count: function () {
     return totalMethods();
   },

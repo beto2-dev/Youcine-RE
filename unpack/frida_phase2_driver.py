@@ -167,7 +167,7 @@ MATRIX_LEVELS = [
     (3, "agent + 06+07+08 (capture stack without the AES hooks)",
      ["06_register_natives_table.js", "07_class_warmup.js",
       "08_redump_dex.js"]),
-    (4, "agent + 06 only (libart inline hooks)",
+    (4, "agent + 06 only (observe-only reflection sweep)",
      ["06_register_natives_table.js"]),
     (5, "agent + 07 only (rpc warm-up, no hooks)",
      ["07_class_warmup.js"]),
@@ -963,6 +963,20 @@ def main() -> int:
         warm_stats = {"ok": 0, "notfound": 0, "fail": 0, "errors": []}
         if warm_script is None:
             note("[phase2] 07 script not loaded - skipping warm-up")
+
+    # -- step 9b: OBSERVE-ONLY RegisterNatives sweep (06 v3) --------------
+    # 06 no longer hooks anything (every interception - inline code patch
+    # or vtable data swap - is detected by the packer's VMP); it runs a
+    # post-hoc Java reflection sweep over the loaded classes once the
+    # warm-up has materialized them, so the table is read AFTER the sweep.
+    if rn_script is not None and names:
+        sweep_rpc = getattr(rn_script.exports, "sweep", None)
+        if sweep_rpc is not None:
+            remaining = max(1, int(DEADLINE - time.time()))
+            r = rpc_watchdog(rn_script, "sweep",
+                             (min(300000, remaining * 1000),),
+                             "rn sweep (post-warm-up)", 600.0)
+            note(f"[phase2] rn sweep result: {r}")
 
     # -- step 10: post-warm-up quiet-window (new registrations expected
     # as libexec re-materializes classes) --------------------------------
