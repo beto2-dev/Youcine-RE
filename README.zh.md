@@ -113,6 +113,23 @@ re-dump (redroid)** 工作流，或本地执行 `GH_TOKEN=<pat> bash
 unpack/redroid_frida_flow.sh`。完整方法论见
 [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md)。
 
+### Phase 2 成果（run 34193490749）
+
+重新转储已经成功：warm-up 加载了 41,852 个类，交错的 SIGSTOP 快照捕获了
+5 种 DEX 布局，且**抽取桩的方法体已原地物化**（每个 DEX 最多重写了
+941 KB 的真实代码），`validate_and_extract_dex.py` 修复了全部校验和
+—— `phase2-1.17.6` Release 中共有 16 个快照文件。RegisterNatives 的
+observe-only 扫描结果只存活于目标进程内（壳的多层自杀机制在 post-warmup
+模块转储开始 6 秒后将其杀死），因此 driver 现在会在表刚产生的那一刻
+（mid-warmup）就持久化 `jni_table.json`，而不是等到流水线结尾。
+
+**可启动（booteable）研究 APK**：`unpack/dedup_redump.py` 从每种 DEX
+布局中选出物化程度最高的快照（即与 `dumps-1.17.6` 原始基线差异最大者），
+**Booteable research APK** 工作流围绕这 5 个 DEX 重建去壳 APK ——
+也就是应用自身执行的那些方法体，即 YouCine + 静态解密的代码 ——
+发布 `booteable-1.17.6` Release 并链接 boot test 作为 CI 证明。
+仅供研究使用。
+
 ## 文档
 
 文档正文目前提供英文与西班牙语版本。
@@ -134,7 +151,10 @@ unpack/redroid_frida_flow.sh`。完整方法论见
 | 标签 | 内容 |
 |---|---|
 | `packed-1.17.6` | 原始加壳样本（分析材料） |
-| `unpacked-1.17.6` | 移除 iJiami 壳后的研究性 APK（成功转储之后） |
+| `dumps-1.17.6` | 第一阶段原始转储 DEX（校验和已修复） |
+| `phase2-1.17.6` | 第二阶段证据：重转储快照、jni_table、模块镜像 |
+| `unpacked-1.17.6` | 移除 iJiami 壳后的研究性 APK（第一阶段 DEX，桩方法体） |
+| `booteable-1.17.6` | **可启动研究 APK：第二阶段物化 DEX（静态解密），启动已经 boot test 验证** |
 
 ## 法律声明
 

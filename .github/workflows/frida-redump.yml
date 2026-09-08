@@ -170,12 +170,17 @@ jobs:
           RN="${RN:-0}"
           RD="${RD:-0}"
           echo "rn_methods=$RN redump_dex_count=$RD"
-          if [ "$RN" -lt 1 ]; then
-            echo '::error::0 RegisterNatives captured (frida-server/anti-frida issue - see logs)'
+          # PRIMARY deliverable = the re-dumped DEXes (run 34193490749:
+          # 16 repaired DEXes, warm-up checkpoint snapshots).  The RN table
+          # is secondary evidence - observe-only capture depends on the
+          # process staying alive (the packer death ladder) and a lost
+          # table must not fail a run whose redump SUCCEEDED.
+          if [ "$RD" -lt 1 ]; then
+            echo '::error::re-dump produced 0 dex - see dumps-phase2 artifact + work/logcat-phase2.txt'
             exit 1
           fi
-          if [ "$RD" -lt 1 ]; then
-            echo '::warning::RegisterNatives table captured but re-dump produced 0 dex (see dumps-phase2 artifact)'
+          if [ "$RN" -lt 1 ]; then
+            echo '::warning::0 RegisterNatives captured (frida-server/anti-frida issue - see logs); re-dump itself succeeded'
           else
             echo "PHASE 2 OK - $RN RegisterNatives methods, $RD re-dumped dex(es)"
           fi

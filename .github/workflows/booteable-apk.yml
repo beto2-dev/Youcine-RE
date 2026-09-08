@@ -1,0 +1,200 @@
+name: Booteable research APK (phase-2 redump DEXes)
+
+# Youcine-RE - build the RESEARCH-ONLY booteable APK from the phase-2
+# re-dump: YouCine + statically decrypted DEX bodies.
+#
+# WHY this build is different from 'unpacked-1.17.6' (rebuild v5):
+#   the v5 rebuild packs the PHASE-1 static dump DEXes - pristine, but
+#   with ~45k extraction-stub bodies that only materialize when a class
+#   initializes, so the app dies at the first VMP-protected method
+#   (App.onCreate -> Aria.init -> SqlHelper.getDb).  The phase-2 warm-up
+#   loaded 41852 classes and the interleaved SIGSTOP snapshots caught
+#   the SAME DEXes with the real method bodies already written in place
+#   (run 34193490749: 16 snapshot files -> 5 unique layouts, up to
+#   941 KB of materialized code per DEX).  This workflow:
+#     1. dedups the 16 phase-2 snapshots to the 5 most-materialized
+#        DEXes (unpack/dedup_redump.py: the snapshot that differs the
+#        most from the pristine phase-1 baseline wins),
+#     2. rebuilds the packer-stripped APK around them (the proven v4
+#        pipeline: BootProvider DE-SDK load + ConfusionUtils kill-switch
+#        neutralized + byte-identical per-ABI DE assets),
+#     3. chains boot-test.yml so the 'booteable' claim is CI-verified
+#        (main thread alive + focused window), not asserted.
+#
+# SOURCES (immutable, from releases - never from a previously rebuilt
+# asset): packed-1.17.6 (original APK), phase2-1.17.6 (the re-dump
+# snapshots), dumps-1.17.6 (the pristine baseline for the materialization
+# scoring).
+#
+# RESEARCH USE ONLY - see README.md (responsible-disclosure framing).
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain_boot_test:
+        description: 'chain the Boot test workflow afterwards'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: booteable-apk
+  cancel-in-progress: false
+
+jobs:
+  booteable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APKTOOL_JAR: work/apktool.jar
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK + apktool
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          mkdir -p work phase2-dex phase1-dex
+          sdkmanager "build-tools;34.0.0" "platforms;android-30" > /dev/null || true
+          curl -fsSL -o work/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar
+
+      - name: Fetch source releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download packed-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "ycMob_1.17.6_ycsite.apk" -O work/packed.apk
+          gh release download phase2-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "redump-dexes-phase2.zip" -O work/redump-dexes.zip
+          gh release download dumps-1.17.6 -R "$GITHUB_REPOSITORY" \
+            -p "dump-dexes-1.17.6.zip" -O work/dump-dexes.zip
+          sha256sum work/packed.apk work/redump-dexes.zip work/dump-dexes.zip
+
+      - name: Extract the snapshot sets
+        run: |
+          unzip -o -q work/redump-dexes.zip -d phase2-dex/
+          unzip -o -q work/dump-dexes.zip -d phase1-dex/
+          echo "phase-2 snapshots:"; ls -la phase2-dex/
+          echo "phase-1 baselines:"; ls -la phase1-dex/
+
+      - name: Dedup - pick the most-materialized snapshot per DEX
+        run: |
+          python3 unpack/dedup_redump.py \
+            --redump-dir  phase2-dex \
+            --baseline-dir phase1-dex \
+            --out-dir     work/booteable-dexes
+          ls -la work/booteable-dexes/
+
+      - name: Compile stubs (no-op s.h.e.l.l.C + BootProvider)
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          mkdir -p work/stubclasses work/stubdex
+          javac -source 8 -target 8 \
+            -bootclasspath "$ANDROID_HOME/platforms/android-30/android.jar" \
+            -d work/stubclasses \
+            unpack/stubs/src/s/h/e/l/l/C.java \
+            unpack/stubs/src/com/youcine/re/BootProvider.java
+          find work/stubclasses -name '*.class' -print0 | xargs -0 \
+            d8 --min-api 21 \
+            --lib "$ANDROID_HOME/platforms/android-30/android.jar" \
+            --output work/stubdex
+          ls -la work/stubdex/classes.dex
+
+      - name: Rebuild the booteable APK (phase-2 DEXes + v4 boot fixes)
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          keytool -genkeypair -keystore work/re.keystore -storepass android \
+            -alias re -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Youcine-RE,O=Research,C=US" 2>/dev/null || true
+          python3 unpack/rebuild_unpacked_apk.py \
+            --apk work/packed.apk \
+            --dump-dir work/booteable-dexes \
+            --out work/youcine-1.17.6-booteable.apk \
+            --keystore work/re.keystore \
+            --storepass android \
+            --boot-dex work/stubdex/classes.dex \
+            --patch-confusion \
+            --work-dir work/build
+
+      - name: Sanity checks
+        run: |
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          unzip -l work/youcine-1.17.6-booteable.apk | \
+            grep -E 'classes[0-9]*\.dex|libijmDataEncryption|AndroidManifest' || true
+          apksigner verify --print-certs work/youcine-1.17.6-booteable.apk | head -5
+          python3 - <<'PY'
+          import struct, zipfile
+          z = zipfile.ZipFile("work/youcine-1.17.6-booteable.apk")
+          dexes = sorted(n for n in z.namelist()
+                         if n == "classes.dex" or
+                         (n.startswith("classes") and n.endswith(".dex")))
+          assert len(dexes) >= 6, "expected 5 app DEXes + the boot DEX, got %d" % len(dexes)
+          for n in dexes:
+              d = z.read(n)
+              assert d[:4] == b"dex\n", n + ": bad magic"
+              hdr_size = struct.unpack_from("<I", d, 32)[0]
+              assert hdr_size == len(d), \
+                  "%s: header file_size %d != stored %d" % (n, hdr_size, len(d))
+              print("[+] %s: %d bytes, header consistent" % (n, len(d)))
+          # the dedup winners must be INSIDE the APK byte-identical
+          import hashlib, pathlib
+          for p in sorted(pathlib.Path("work/booteable-dexes").glob("*.dex")):
+              want = hashlib.sha256(p.read_bytes()).hexdigest()
+              got = hashlib.sha256(z.read(p.name)).hexdigest()
+              assert want == got, p.name + ": APK copy differs from the dedup winner"
+          print("[+] all 5 dedup winners embedded byte-identical")
+          # binary AXML stores the string pool as UTF-16LE
+          man = z.read("AndroidManifest.xml")
+          for probe in ("com.youcine.re.BootProvider",
+                        "com.mobile.brasiltv.app.App"):
+              assert probe.encode("utf-16-le") in man, probe + " missing"
+          print("[+] BootProvider + real Application present in the binary manifest")
+          PY
+          if [ -f work/build/confusion-patched-classes.dex ]; then
+            echo "confusion patch: applied"
+          else
+            echo "::warning::confusion patch output missing (check rebuild log)"
+          fi
+
+      - name: Publish + chain boot test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha256sum work/youcine-1.17.6-booteable.apk | tee work/booteable.sha256
+          gh release create booteable-1.17.6 \
+            --title "Booteable research build 1.17.6 (static descifrado)" \
+            --notes "YouCine 1.17.6 rebuilt around the PHASE-2 re-dump DEXes: the warm-up materialized the iJiami extraction-stub method bodies in memory (up to 941 KB of real code per DEX) and the interleaved SIGSTOP snapshots captured them; dedup_redump.py picked the most-materialized snapshot of each of the 5 DEX layouts. Same v4 boot fixes as the unpacked build (BootProvider DE-SDK load, ConfusionUtils kill-switch neutralized, byte-identical per-ABI DE assets). Boot is verified by the chained boot-test workflow. RESEARCH USE ONLY - see README." \
+            --target "$GITHUB_SHA" || true
+          gh release upload booteable-1.17.6 \
+            work/youcine-1.17.6-booteable.apk work/booteable.sha256 --clobber || true
+          if [ "${{ github.event.inputs.chain_boot_test }}" != "false" ]; then
+            gh workflow run boot-test.yml -R "$GITHUB_REPOSITORY" --ref main \
+              -f apk_source=release -f tag=booteable-1.17.6 \
+              -f apk_asset=youcine-1.17.6-booteable.apk || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: booteable-build-${{ github.run_id }}
+          path: |
+            work/build/decoded/AndroidManifest.xml
+            work/build/confusion-patched-classes.dex
+            work/booteable.sha256
+          if-no-files-found: warn
+          retention-days: 7

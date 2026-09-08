@@ -505,6 +505,40 @@ def rpc_watchdog(script, name: str, args: tuple, desc: str, timeout: float = 300
     return val
 
 
+def persist_rn_table(rn_script, stage: str) -> None:
+    """Pull the script-side RN table NOW and flush it to disk.
+
+    Run 34193490749 (phase2 r21): the mid-warmup sweep captured 26 native
+    methods, the count() quiet-window even SAW them ("post-warmup: rn
+    count=26"), but the process died 6s into the post-warmup module dump
+    and the only table() fetch lived at the END of the pipeline - so
+    jni_table.json shipped 0 classes / 0 methods and the Verdict failed
+    on a capture that HAD happened.  The sweep result only lives inside
+    the target process, so the table must be adopted (and written) at
+    the first moment it exists, then re-adopted on every later chance.
+    """
+    global RN_TABLE
+    if rn_script is None or DETACHED["flag"]:
+        return
+    tbl = rpc_watchdog(rn_script, "table", (),
+                       f"table() fetch ({stage})", 120.0)
+    if not isinstance(tbl, dict):
+        return
+    for cls, rows in tbl.items():
+        if isinstance(rows, list):
+            merge_rn(str(cls), rows)
+    total = sum(len(v) for v in RN_TABLE.values())
+    try:
+        (OUT / "jni_table.json").write_text(
+            json.dumps(RN_TABLE, indent=2, sort_keys=True,
+                       ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as e:
+        note(f"[!] persist_rn_table({stage}) write failed: {e}")
+        return
+    note(f"[phase2] jni_table persisted after {stage}: "
+         f"{len(RN_TABLE)} classes / {total} methods")
+
+
 def out_of_budget(what: str) -> bool:
     if time.time() > DEADLINE:
         note(f"[!] PHASE2_TIMEOUT ({PHASE2_TIMEOUT}s) exceeded before {what} "
@@ -704,6 +738,10 @@ def run_warmup(warm_script, rn_script, names: list[str]) -> dict:
                 r = rpc_watchdog(rn_script, "sweep", (240000,),
                                  "rn sweep (mid-warmup)", 300.0)
                 note(f"[phase2] mid-warmup rn sweep result: {r}")
+                # the sweep result dies with the process (run 34193490749:
+                # app died 6s into the post-warmup module dumps) - adopt
+                # the table into RN_TABLE + jni_table.json RIGHT NOW
+                persist_rn_table(rn_script, "mid-warmup sweep")
         write_warmup_stats(stats, done, total, loaded_pre=loaded_pre)
     loaded_post = None
     if not DETACHED["flag"] and not out_of_budget("loadedcount (post)"):
@@ -1094,6 +1132,10 @@ def main() -> int:
             and not out_of_budget("post-warmup quiet-window"):
         remaining = max(1, int(DEADLINE - time.time()))
         wait_rn_quiet(rn_script, "post-warmup", min(quiet_cap, remaining))
+        # second adoption point: after the quiet-window the table holds
+        # everything the mid-warmup sweep saw; re-adopt + re-flush BEFORE
+        # the module dumps (the historical death spot - run 34193490749)
+        persist_rn_table(rn_script, "post-warmup quiet-window")
 
     # extra evidence: DEX-span census after the warm-up
     if redump_script is not None and not out_of_budget("dexcensus (post)"):
@@ -1143,6 +1185,7 @@ def main() -> int:
     # -- step 14c: final JNI table (script-side fetch, post-sweep) --------
     if rn_script is not None and not DETACHED["flag"] \
             and not out_of_budget("jni table fetch"):
+        # third adoption point (the historical one, kept for the live path)
         tbl = rpc_watchdog(rn_script, "table", (), "table() fetch", 120.0)
         if isinstance(tbl, dict):
             tbl_methods = sum(len(v) for v in tbl.values())

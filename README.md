@@ -174,6 +174,27 @@ re-dump (redroid)**, or locally `GH_TOKEN=<pat> bash
 unpack/redroid_frida_flow.sh`. Full methodology in
 [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
 
+### Phase 2 outcome (run 34193490749)
+
+The re-dump WORKS: the warm-up loaded 41,852 classes, the interleaved
+SIGSTOP snapshots captured the 5 DEX layouts **with the extraction-stub
+bodies materialized in place** (up to 941 KB of real code rewritten per
+DEX), and `validate_and_extract_dex.py` repaired every checksum - 16
+snapshot files in the `phase2-1.17.6` release. The RegisterNatives
+observe-sweep survives only inside the target process (the packer death
+ladder killed it 6 s into the post-warmup module dumps), so the driver
+now persists `jni_table.json` at the first moment the table exists
+(mid-warmup), not only at pipeline end.
+
+**Booteable research APK**: `unpack/dedup_redump.py` picks the
+most-materialized snapshot of each DEX layout (the one differing the
+most from the pristine `dumps-1.17.6` baseline) and the
+**Booteable research APK** workflow rebuilds the packer-stripped APK
+around those 5 DEXes - the same bodies the app itself executes, i.e.
+YouCine + statically decrypted code - publishing the
+`booteable-1.17.6` release and chaining the boot test as CI proof.
+RESEARCH USE ONLY.
+
 ## Documentation
 
 | EN | ES |
@@ -194,7 +215,10 @@ Machine-readable map: `evidence/findings.json`. Stub sources from Jadx:
 | Tag | Content |
 |---|---|
 | `packed-1.17.6` | Original packed sample (analysis material) |
-| `unpacked-1.17.6` | Research APK with iJiami shell removed (after a successful dump) |
+| `dumps-1.17.6` | Pristine phase-1 dump DEXes (checksum-repaired) |
+| `phase2-1.17.6` | Phase-2 evidence: re-dump snapshots, jni_table, module images |
+| `unpacked-1.17.6` | Research APK with iJiami shell removed (phase-1 DEXes, stub bodies) |
+| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes (static decryption), boot-test-verified** |
 
 ## Legal
 

@@ -176,10 +176,42 @@ re-dump (redroid)**, o localmente `GH_TOKEN=<pat> bash
 unpack/redroid_frida_flow.sh`. Metodologia completa en
 [docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
 
+### Resultado de la Fase 2 (run 34193490749)
+
+El re-dump FUNCIONA: el warm-up cargo 41.852 clases, los snapshots
+SIGSTOP intercalados capturaron los 5 layouts DEX **con los cuerpos de
+los stubs de extraccion ya materializados en su sitio** (hasta 941 KB
+de codigo real reescrito por DEX) y `validate_and_extract_dex.py`
+reparo todos los checksums - 16 archivos de snapshot en el release
+`phase2-1.17.6`. El barrido observe-only de RegisterNatives solo vive
+dentro del proceso objetivo (la escalera de muerte del packer lo mato
+6 s despues de iniciar los dumps de modulos post-warmup), asi que el
+driver ahora persiste `jni_table.json` en el primer instante en que la
+tabla existe (mid-warmup), no solo al final del pipeline.
+
+**APK booteable de investigacion**: `unpack/dedup_redump.py` elige el
+snapshot mas materializado de cada layout DEX (el que mas difiere del
+baseline pristino de `dumps-1.17.6`) y el workflow **Booteable
+research APK** reconstruye la APK sin packer alrededor de esos 5 DEX -
+los mismos cuerpos que la propia app ejecuta, es decir, YouCine +
+codigo estaticamente descifrado - publicando el release
+`booteable-1.17.6` y encadenando el boot test como prueba en CI.
+SOLO PARA INVESTIGACION.
+
 ## Documentacion
 
 Tabla equivalente en [README.md](README.md). Mapa maquina:
 `evidence/findings.json`. Stub Jadx: `evidence/stub/`.
+
+## Releases (privadas)
+
+| Tag | Contenido |
+|---|---|
+| `packed-1.17.6` | Muestra original empaquetada (material de analisis) |
+| `dumps-1.17.6` | DEX pristinos del dump fase 1 (checksums reparados) |
+| `phase2-1.17.6` | Evidencia fase 2: snapshots del re-dump, jni_table, imagenes de modulos |
+| `unpacked-1.17.6` | APK de investigacion sin shell iJiami (DEX fase 1, cuerpos stub) |
+| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados (descifrado estatico), arranque verificado por boot test** |
 
 ## Legal
 

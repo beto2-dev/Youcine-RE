@@ -123,6 +123,28 @@ re-dump (redroid)**, ou en local `GH_TOKEN=<pat> bash
 unpack/redroid_frida_flow.sh`. Méthodologie complète dans
 [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
 
+### Résultat de la Phase 2 (run 34193490749)
+
+Le re-dump FONCTIONNE : le warm-up a chargé 41 852 classes, les
+snapshots SIGSTOP entrelacés ont capturé les 5 dispositions DEX **avec
+les corps des stubs d'extraction déjà matérialisés en place** (jusqu'à
+941 Ko de code réel réécrit par DEX) et `validate_and_extract_dex.py`
+a réparé tous les checksums - 16 fichiers de snapshot dans la Release
+`phase2-1.17.6`. Le balayage observe-only de RegisterNatives ne survit
+qu'à l'intérieur du processus cible (l'escalier de mort du packer l'a
+tué 6 s après le début des dumps de modules post-warmup), donc le
+driver persiste désormais `jni_table.json` dès le premier instant où la
+table existe (mid-warmup), et pas seulement en fin de pipeline.
+
+**APK de recherche amorçable (booteable)** : `unpack/dedup_redump.py`
+choisit le snapshot le plus matérialisé de chaque disposition DEX
+(celui qui diffère le plus de la baseline vierge de `dumps-1.17.6`) et
+le workflow **Booteable research APK** reconstruit l'APK sans packer
+autour de ces 5 DEX - les mêmes corps que l'application exécute
+elle-même, c'est-à-dire YouCine + code statiquement déchiffré - en
+publiant la Release `booteable-1.17.6` et en enchaînant le boot test
+comme preuve CI. POUR LA RECHERCHE UNIQUEMENT.
+
 ## Documentation
 
 Les documents détaillés sont disponibles en anglais et en espagnol.
@@ -144,7 +166,10 @@ Carte lisible par machine : `evidence/findings.json`. Sources du stub issues de 
 | Tag | Contenu |
 |---|---|
 | `packed-1.17.6` | Échantillon packé original (matériel d'analyse) |
-| `unpacked-1.17.6` | APK de recherche avec le shell iJiami retiré (après un dump réussi) |
+| `dumps-1.17.6` | DEX vierges du dump phase 1 (checksums réparés) |
+| `phase2-1.17.6` | Preuves phase 2 : snapshots du re-dump, jni_table, images de modules |
+| `unpacked-1.17.6` | APK de recherche sans shell iJiami (DEX phase 1, corps stub) |
+| `booteable-1.17.6` | **APK de recherche amorçable : DEX phase 2 matérialisés (déchiffrement statique), démarrage vérifié par boot test** |
 
 ## Juridique
 
