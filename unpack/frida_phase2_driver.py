@@ -143,7 +143,22 @@ def try_reattach(device, load_names, old_session, old_scripts, reattaches):
     key hooks all still work on the restarted instance."""
     new_pid = pidof(APP_ID)
     if new_pid is None:
-        note("[phase2] re-attach skipped: app is dead")
+        # AMS restarts a killed top-activity process within ~0.5-2s; poll
+        # briefly before giving up (run 34172332498 post-mortem: the check
+        # ran a single pidof a few ms after the death, missed the restart
+        # that landed moments later and the capture ended with rc=3)
+        for _ in range(12):
+            if out_of_budget("re-attach restart-wait"):
+                break
+            time.sleep(0.5)
+            new_pid = pidof(APP_ID)
+            if new_pid is not None:
+                note(f"[phase2] app restarted at pid {new_pid} "
+                     "(restart-wait) - re-attaching")
+                break
+    if new_pid is None:
+        note("[phase2] re-attach skipped: app is dead "
+             "(no AMS restart within the wait window)")
         return old_session, old_scripts, None, None, None, reattaches
     try:
         new_session = device.attach(new_pid)

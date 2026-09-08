@@ -60,7 +60,7 @@ function getfn(name, ret, args) {
 var M = {
   read: null, write: null, lseek: null, close: null, fileno: null,
   fdopen: null, memfd_create: null, syscall: null, opendir: null,
-  readdir: null, closedir: null, getpid: null
+  readdir: null, closedir: null, getpid: null, fclose: null
 };
 
 function libc_init() {
@@ -70,6 +70,7 @@ function libc_init() {
   M.close = getfn('close', 'int', ['int']);
   M.fileno = getfn('fileno', 'int', ['pointer']);
   M.fdopen = getfn('fdopen', 'pointer', ['int', 'pointer']);
+  M.fclose = getfn('fclose', 'int', ['pointer']);
   M.getpid = getfn('getpid', 'int', []);
   M.opendir = getfn('opendir', 'pointer', ['pointer']);
   M.readdir = getfn('readdir', 'pointer', ['pointer']);
@@ -105,9 +106,14 @@ function read_all_fd(fd) {
 }
 
 function make_memfd(content) {
-  /* memfd labeled "jit-cache"; returns the fd rewound to 0, or -1 */
+  /* memfd labeled "jit-cache"; returns the fd rewound to 0, or -1.
+   * NOTE: allocUtf8String, NOT allocAnsiString - the ANSI API throws
+   * "only applicable on Windows" on Linux/Android frida (run 34172332498
+   * post-mortem: the sanitizer silently failed exactly here and the
+   * packer's anti-frida maps check saw the real content, refused to run
+   * RegisterNatives and the app died on UnsatisfiedLinkError N.al) */
   try {
-    var name = Memory.allocAnsiString('jit-cache');
+    var name = Memory.allocUtf8String('jit-cache');
     var fd;
     if (M.memfd_create) {
       fd = M.memfd_create(name, 0);
@@ -144,7 +150,7 @@ function looks_frida_thread(name) {
 
 function scan_frida_threads() {
   try {
-    var dp = Memory.allocAnsiString('/proc/self/task');
+    var dp = Memory.allocUtf8String('/proc/self/task');
     var dir = M.opendir(dp);
     if (dir.isNull()) { return; }
     for (;;) {
@@ -334,12 +340,11 @@ function hook_fopen(name) {
           if (clean === content) { return; }
           var mfd = make_memfd(clean);
           if (mfd < 0) { return; }
-          var mode = Memory.allocAnsiString(this.mode.indexOf('w') !== -1 ? 'w+' : 'r');
+          var mode = Memory.allocUtf8String(this.mode.indexOf('w') !== -1 ? 'w+' : 'r');
           var nf = M.fdopen(mfd, mode);
           if (nf.isNull()) { return; }
           /* close the original stream (safe: fclose never re-enters fopen) */
-          var fclose = getfn('fclose', 'int', ['pointer']);
-          if (fclose) { fclose(retval); }
+          if (M.fclose) { M.fclose(retval); }
           retval.replace(nf);
           send({ type: 'hidefrida', what: 'proc', path: this.path });
         } catch (e) { /* never crash the app */ }
