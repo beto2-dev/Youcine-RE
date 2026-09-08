@@ -84,14 +84,27 @@ function getLoaders() {
       // keep going - a broken loader entry loses one candidate, not the sweep
     }
   }
-  // raw jobject handles: the bridge wrapper's $handle is the raw loader
-  // object (the bridge's METHOD MARSHALLING is broken under the stealth
-  // patch - $borrowClassHandle TypeError - but wrapper creation and the
-  // raw JNIEnv are fully functional, run 34183750848)
+  // raw jobject handles: the bridge wrapper's raw object pointer
+  // (frida-java-bridge versions expose it as $handle OR $h - run
+  // 34189152176 got 0 loaders with $handle only; the bridge's METHOD
+  // MARSHALLING is broken under the stealth patch - $borrowClassHandle
+  // TypeError - but wrapper creation and the raw JNIEnv are functional)
+  function handleOf(w) {
+    try {
+      if (w) {
+        if (w.$handle) { return w.$handle; }
+        if (w.$h) { return w.$h; }
+      }
+    } catch (e) {}
+    return null;
+  }
   try {
     var main = Java.classFactory.loader;
-    if (main && main.$handle) {
-      add(ptr(main.$handle));
+    var h = handleOf(main);
+    if (h) {
+      add(ptr(h));
+    } else {
+      log('classFactory.loader handle not found ($handle/$h)');
     }
   } catch (e) {
     log('classFactory.loader: ' + e);
@@ -99,11 +112,10 @@ function getLoaders() {
   try {
     Java.enumerateClassLoaders({
       onMatch: function (loader) {
-        try {
-          if (loader && loader.$handle) {
-            add(ptr(loader.$handle));
-          }
-        } catch (e) {}
+        var lh = handleOf(loader);
+        if (lh) {
+          add(ptr(lh));
+        }
       },
       onComplete: function () {}
     });

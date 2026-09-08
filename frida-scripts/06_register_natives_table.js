@@ -239,19 +239,187 @@ function fnOf(m) {
  * Pure reads + reflection - nothing is modified anywhere.  Runs ONLY when
  * the driver invokes it (post-warm-up); the offset discovery happens on
  * the first sweep call, never at script load. */
+/* ------------------------------------------------------------------
+ * raw-JNI sweep: the bridge's method marshalling is broken under the
+ * deep stealth patch ($borrowClassHandle TypeError on every wrapper
+ * METHOD call - runs 34183750848/34189152176), so getDeclaredMethods /
+ * getModifiers / getName / getParameterTypes all go through the JNIEnv
+ * vtable directly.  Slots from the authoritative jni.h struct order
+ * (+4 reserved, anchors RegisterNatives@215 / GetObjectRefType@232):
+ * FindClass@6, ExceptionClear@17, ExceptionOccurred@15, DeleteLocalRef@23,
+ * GetObjectClass@31, GetMethodID@33, CallObjectMethod@34,
+ * CallIntMethod@49, GetStaticMethodID@113, CallStaticObjectMethod@114,
+ * NewStringUTF@167, GetStringUTFChars@169, ReleaseStringUTFChars@170,
+ * GetArrayLength@171, GetObjectArrayElement@173, ExceptionCheck@228.
+ * ------------------------------------------------------------------ */
+var JNI = null;
+
+function jniInit(envHandle) {
+  if (JNI && JNI.env.equals(envHandle)) {
+    return JNI;
+  }
+  var E = envHandle;
+  var table = Memory.readPointer(E);
+  var ps = Process.pointerSize;
+  function fn(slotIdx, ret, args) {
+    return new NativeFunction(Memory.readPointer(table.add(slotIdx * ps)),
+                              ret, args);
+  }
+  JNI = {
+    env: E,
+    FindClass: fn(6, 'pointer', ['pointer', 'pointer']),
+    ExceptionOccurred: fn(15, 'pointer', ['pointer']),
+    ExceptionClear: fn(17, 'void', ['pointer']),
+    DeleteLocalRef: fn(23, 'void', ['pointer', 'pointer']),
+    GetObjectClass: fn(31, 'pointer', ['pointer', 'pointer']),
+    GetMethodID: fn(33, 'pointer',
+                    ['pointer', 'pointer', 'pointer', 'pointer']),
+    CallObjectMethod: fn(34, 'pointer',
+                         ['pointer', 'pointer', 'pointer']),
+    CallIntMethod: fn(49, 'int', ['pointer', 'pointer', 'pointer']),
+    GetStaticMethodID: fn(113, 'pointer',
+                          ['pointer', 'pointer', 'pointer', 'pointer']),
+    CallStaticObjectMethod: fn(114, 'pointer',
+                               ['pointer', 'pointer', 'pointer', 'pointer',
+                                'int', 'pointer']),
+    NewStringUTF: fn(167, 'pointer', ['pointer', 'pointer']),
+    GetStringUTFChars: fn(169, 'pointer',
+                          ['pointer', 'pointer', 'pointer']),
+    ReleaseStringUTFChars: fn(170, 'void',
+                              ['pointer', 'pointer', 'pointer']),
+    GetArrayLength: fn(171, 'int', ['pointer', 'pointer']),
+    GetObjectArrayElement: fn(173, 'pointer',
+                              ['pointer', 'pointer', 'int']),
+    ExceptionCheck: fn(228, 'int', ['pointer'])
+  };
+  return JNI;
+}
+
+function jstr(J, s) {
+  try {
+    if (s.isNull()) { return ''; }
+    var p = J.GetStringUTFChars(J.env, s, ptr(0));
+    if (p.isNull()) { return ''; }
+    var r = Memory.readCString(p);
+    J.ReleaseStringUTFChars(J.env, s, p);
+    return r;
+  } catch (e) {
+    return '';
+  }
+}
+
+/* Class object -> type descriptor (Ljava/lang/String; / I / [B ...) */
+function classDescriptor(J, c, alloc) {
+  try {
+    var ccls = J.GetObjectClass(J.env, c);
+    var nmid = J.GetMethodID(J.env, ccls, alloc('getName'),
+                             alloc('()Ljava/lang/String;'));
+    var s = J.CallObjectMethod(J.env, c, nmid);
+    var nm = jstr(J, s);
+    J.DeleteLocalRef(J.env, s);
+    J.DeleteLocalRef(J.env, ccls);
+    if (nm.charAt(0) === '[') {
+      return nm.replace(/\./g, '/');
+    }
+    if (PRIM[nm]) { return PRIM[nm]; }
+    return 'L' + nm.replace(/\./g, '/') + ';';
+  } catch (e) {
+    return '?';
+  }
+}
+
+function methodSigJNI(J, m, mcls, alloc) {
+  try {
+    var ptmid = J.GetMethodID(J.env, mcls, alloc('getParameterTypes'),
+                              alloc('()[Ljava/lang/Class;'));
+    var pt = J.CallObjectMethod(J.env, m, ptmid);
+    var s = '(';
+    if (!pt.isNull()) {
+      var n = J.GetArrayLength(J.env, pt);
+      for (var i = 0; i < n; i++) {
+        var c = J.GetObjectArrayElement(J.env, pt, i);
+        s += classDescriptor(J, c, alloc);
+        J.DeleteLocalRef(J.env, c);
+      }
+      J.DeleteLocalRef(J.env, pt);
+    }
+    var rtmid = J.GetMethodID(J.env, mcls, alloc('getReturnType'),
+                              alloc('()Ljava/lang/Class;'));
+    var rt = J.CallObjectMethod(J.env, m, rtmid);
+    s += ')' + (rt.isNull() ? 'V' : classDescriptor(J, rt, alloc));
+    if (!rt.isNull()) {
+      J.DeleteLocalRef(J.env, rt);
+    }
+    return s;
+  } catch (e) {
+    return '?';
+  }
+}
+
+function handleOf(w) {
+  try {
+    if (w) {
+      if (w.$handle) { return w.$handle; }
+      if (w.$h) { return w.$h; }
+    }
+  } catch (e) {}
+  return null;
+}
+
+function loaderHandles() {
+  var out = [];
+  var seen = {};
+  function add(h) {
+    var key = String(h);
+    if (!seen[key]) {
+      seen[key] = true;
+      out.push(h);
+    }
+  }
+  try {
+    var h = handleOf(Java.classFactory.loader);
+    if (h) { add(ptr(h)); }
+  } catch (e) {}
+  try {
+    Java.enumerateClassLoaders({
+      onMatch: function (loader) {
+        var lh = handleOf(loader);
+        if (lh) { add(ptr(lh)); }
+      },
+      onComplete: function () {}
+    });
+  } catch (e) {}
+  return out;
+}
+
 function sweep(budgetMs) {
   if (swept) {
     return 'already';
   }
   swept = true;
   var t0 = Date.now();
-  Java.perform(function () {
-    try {
-      discoverOffsets();
-    } catch (e) {
-      log('discoverOffsets: ' + e);
+  var J = null;
+  var alloc = null;
+  var forNameMID = null;
+  var clsClass = null;
+  var loaders = [];
+  try {
+    var env = Java.vm.getEnv();
+    J = jniInit(env.handle);
+    alloc = function (s) { return Memory.allocUtf8String(s); };
+    clsClass = J.FindClass(J.env, alloc('java/lang/Class'));
+    forNameMID = J.GetStaticMethodID(
+        J.env, clsClass, alloc('forName'),
+        alloc('(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;'));
+    if (clsClass.isNull() || forNameMID.isNull()) {
+      throw new Error('forName setup failed');
     }
-  });
+    loaders = loaderHandles();
+    log('sweep setup: ' + loaders.length + ' loader(s)');
+  } catch (e) {
+    log('sweep setup failed: ' + e);
+    return 'error';
+  }
   var classes = [];
   try {
     classes = Java.enumerateLoadedClassesSync();
@@ -268,51 +436,64 @@ function sweep(budgetMs) {
       break;
     }
     var name = classes[ci];
-    var cls = null;
-    try {
-      cls = Java.use(name).class;
-    } catch (e) {
+    var js = J.NewStringUTF(J.env, alloc(name));
+    var cls = ptr(0);
+    for (var li = 0; li < loaders.length; li++) {
+      var r = J.CallStaticObjectMethod(J.env, clsClass, forNameMID,
+                                       js, 0, loaders[li]);
+      if (J.ExceptionCheck(J.env) === 0) {
+        cls = r;
+        break;
+      }
+      J.ExceptionClear(J.env);
+    }
+    J.DeleteLocalRef(J.env, js);
+    if (cls.isNull()) {
       continue;               // not loadable from this classloader set
     }
     try {
-      var methods = cls.getDeclaredMethods();
-      for (var i = 0; i < methods.length; i++) {
-        var m = methods[i];
-        var mods;
-        try {
-          mods = m.getModifiers();
-        } catch (e) {
-          continue;
+      var dmid = J.GetMethodID(J.env, cls, alloc('getDeclaredMethods'),
+                               alloc('()[Ljava/lang/reflect/Method;'));
+      var arr = J.CallObjectMethod(J.env, cls, dmid);
+      if (J.ExceptionCheck(J.env) !== 0) {
+        J.ExceptionClear(J.env);
+        J.DeleteLocalRef(J.env, cls);
+        continue;
+      }
+      if (!arr.isNull()) {
+        var n = J.GetArrayLength(J.env, arr);
+        for (var i = 0; i < n; i++) {
+          var m = J.GetObjectArrayElement(J.env, arr, i);
+          var mcls = J.GetObjectClass(J.env, m);
+          var modmid = J.GetMethodID(J.env, mcls, alloc('getModifiers'),
+                                     alloc('()I'));
+          var mods = J.CallIntMethod(J.env, m, modmid);
+          if ((mods & 0x100) !== 0) {   // Modifier.NATIVE
+            var nmid = J.GetMethodID(J.env, mcls, alloc('getName'),
+                                     alloc('()Ljava/lang/String;'));
+            var ns = J.CallObjectMethod(J.env, m, nmid);
+            var mname = jstr(J, ns);
+            J.DeleteLocalRef(J.env, ns);
+            var rec = {
+              name: mname,
+              sig: methodSigJNI(J, m, mcls, alloc),
+              fn: '?',
+              mod: '<pending>',
+              off: '?'
+            };
+            record(name, rec);
+          }
+          J.DeleteLocalRef(J.env, mcls);
+          J.DeleteLocalRef(J.env, m);
         }
-        if ((mods & 0x100) === 0) {
-          continue;           // not native
-        }
-        var mname;
-        try {
-          mname = String(m.getName());
-        } catch (e) {
-          continue;
-        }
-        var rec = {
-          name: mname,
-          sig: sigOf(m),
-          fn: '?',
-          mod: '<unknown>',
-          off: '?'
-        };
-        var fn = fnOf(m);
-        if (fn) {
-          var mod = Process.findModuleByAddress(fn);
-          rec.fn = String(fn);
-          rec.mod = mod ? mod.name : '<anon>';
-          rec.off = mod ? '0x' + fn.sub(mod.base).toString(16) : '?';
-        }
-        record(name, rec);
+        J.DeleteLocalRef(J.env, arr);
       }
       seen++;
     } catch (e) {
       // one class must not kill the sweep
+      try { J.ExceptionClear(J.env); } catch (ce) {}
     }
+    J.DeleteLocalRef(J.env, cls);
   }
   var total = totalMethods();
   log('sweep done: ' + seen + ' classes visited, ' + total +
