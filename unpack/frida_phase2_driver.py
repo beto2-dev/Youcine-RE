@@ -498,12 +498,17 @@ def wait_rn_quiet(rn_script, stage: str, cap_s: int) -> int:
             note(f"[phase2] {stage}: session detached - stopping quiet-window")
             break
         try:
-            c = rpc(rn_script, "count")
+            # bounded call: run 34177514528 hung ~56 minutes here - the
+            # BARE rpc() has no timeout and one stuck channel froze the
+            # whole pipeline past the 60-minute job timeout
+            c = rpc_watchdog(rn_script, "count", (), "count()", 10.0)
         except Exception as e:
             note(f"[phase2] {stage}: count() rpc failed "
                  f"({type(e).__name__}: {e}) - stopping quiet-window")
             break
         if c is None:
+            note(f"[phase2] {stage}: count() rpc unavailable (timeout/"
+                 "error, noted by the watchdog) - stopping quiet-window")
             break
         if c != last:
             last = c
