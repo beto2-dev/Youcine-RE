@@ -256,6 +256,136 @@ def in_forbidden(off: int, rng: list) -> bool:
     return any(lo <= off < hi for lo, hi in rng)
 
 
+# ---------------------------------------------------------------------------
+# DT_HASH re-link: the deep rename changes a dynsym name's SysV hash
+# bucket, and the injector resolves the agent entry through DT_HASH
+# (run 34174568790: "undefined symbol: afcda_agent_main").  SysV chains
+# hold symbol INDICES (names are matched by strcmp), so moving the symbol
+# to the head of its new bucket's chain is a complete fix.
+# ---------------------------------------------------------------------------
+def elf_hash(name: bytes) -> int:
+    h = 0
+    for c in name:
+        h = ((h << 4) + c) & 0xFFFFFFFF
+        g = h & 0xF0000000
+        if g:
+            h ^= g >> 24
+        h &= (~g) & 0xFFFFFFFF
+    return h
+
+
+def fix_agent_hash_chains(data: bytearray, base: int, cls: int) -> int:
+    import struct
+    if cls == 2:
+        phoff = struct.unpack_from("<Q", data, base + 0x20)[0]
+        phentsize, phnum = struct.unpack_from("<HH", data, base + 0x36)
+        dynent, sym_ent_fmt = 16, 24
+    else:
+        phoff = struct.unpack_from("<I", data, base + 0x1C)[0]
+        phentsize, phnum = struct.unpack_from("<HH", data, base + 0x2A)
+        dynent, sym_ent_fmt = 8, 16
+    loads = []
+    dyn_vaddr = None
+    for i in range(phnum):
+        off = base + phoff + i * phentsize
+        p_type = struct.unpack_from("<I", data, off)[0]
+        if cls == 2:
+            p_offset, p_vaddr = struct.unpack_from("<QQ", data, off + 8)[:2]
+            p_filesz = struct.unpack_from("<Q", data, off + 0x20)[0]
+        else:
+            p_offset = struct.unpack_from("<I", data, off + 4)[0]
+            p_vaddr = struct.unpack_from("<I", data, off + 8)[0]
+            p_filesz = struct.unpack_from("<I", data, off + 16)[0]
+        if p_type == 1:
+            loads.append((p_vaddr, p_vaddr + p_filesz,
+                          base + p_offset, base + p_offset + p_filesz))
+        elif p_type == 2:
+            dyn_vaddr = p_vaddr
+
+    def v2o(v: int):
+        for vlo, vhi, flo, fhi in loads:
+            if vlo <= v < vhi:
+                return flo + (v - vlo)
+        return None
+
+    if dyn_vaddr is None:
+        return 0
+    doff = v2o(dyn_vaddr)
+    if doff is None:
+        return 0
+    ents = {}
+    i = doff
+    while True:
+        if cls == 2:
+            tag, val = struct.unpack_from("<QQ", data, i)
+        else:
+            tag, val = struct.unpack_from("<II", data, i)
+        if tag == 0:
+            break
+        ents.setdefault(tag, val)
+        i += dynent
+    if 4 not in ents or 6 not in ents or 5 not in ents:
+        return 0          # no SysV hash table (GNU-hash only) - nothing to fix
+    hash_off = v2o(ents[4])
+    sym_off = v2o(ents[6])
+    str_off = v2o(ents[5])
+    syment = ents.get(11, sym_ent_fmt)
+    strsz = ents.get(10, 0)
+    if None in (hash_off, sym_off, str_off):
+        return 0
+    nbucket, nchain = struct.unpack_from("<II", data, hash_off)
+    buckets_off = hash_off + 8
+    chains_off = buckets_off + 4 * nbucket
+    fixed = 0
+    for si in range(nchain):
+        st_name = struct.unpack_from("<I", data, sym_off + si * syment)[0]
+        if st_name >= strsz:
+            continue
+        nul = data.find(b"\x00", str_off + st_name, str_off + strsz)
+        if nul < 0:
+            continue
+        name = bytes(data[str_off + st_name:nul])
+        if b"afcda" not in name:
+            continue
+        old = name.replace(b"afcda", b"frida")
+        ob = elf_hash(old) % nbucket
+        nb = elf_hash(name) % nbucket
+        if ob == nb:
+            continue       # same bucket - strcmp still finds it
+        # unlink si from the old bucket chain
+        head = struct.unpack_from("<I", data, buckets_off + 4 * ob)[0]
+        if head == si:
+            nxt = struct.unpack_from("<I", data, chains_off + 4 * si)[0]
+            struct.pack_into("<I", data, buckets_off + 4 * ob, nxt)
+        else:
+            cur = head
+            while cur:
+                nxt = struct.unpack_from("<I", data, chains_off + 4 * cur)[0]
+                if nxt == si:
+                    si_next = struct.unpack_from(
+                        "<I", data, chains_off + 4 * si)[0]
+                    struct.pack_into("<I", data, chains_off + 4 * cur,
+                                     si_next)
+                    break
+                cur = nxt
+        # push si onto the new bucket chain
+        old_head = struct.unpack_from("<I", data, buckets_off + 4 * nb)[0]
+        struct.pack_into("<I", data, chains_off + 4 * si, old_head)
+        struct.pack_into("<I", data, buckets_off + 4 * nb, si)
+        fixed += 1
+        print(f"[stealth]   DT_HASH re-link @blob {hex(base)}: "
+              f"symbol #{si} {old!r} bucket {ob} -> {nb} ({name!r})")
+    return fixed
+
+
+def fix_all_agent_hashes(data: bytearray) -> int:
+    total = 0
+    for a in find_embedded_agents(bytes(data)):
+        cls = elf_class(bytes(data[a:]))
+        total += fix_agent_hash_chains(data, a, cls)
+    return total
+
+
 def main() -> int:
     argv = sys.argv[1:]
     verify_only = "--verify-only" in argv
@@ -329,6 +459,14 @@ def main() -> int:
         if n:
             print(f"[stealth]   force {needle!r} -> {repl!r}: {n} patched")
             changed += n
+
+    # pass 4: re-link the agents' SysV DT_HASH chains so the renamed
+    # dynsym entries are still resolvable by the injector
+    if deep:
+        nfix = fix_all_agent_hashes(data)
+        if nfix:
+            print(f"[stealth]   DT_HASH re-links: {nfix}")
+            changed += nfix
 
     if verify_only:
         print(f"[stealth] verify-only (changed would be {changed})")
