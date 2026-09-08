@@ -325,8 +325,14 @@ def verify_head(head: bytes) -> dict:
     window = head[:HEAD_KIB * 1024]
     lcom = window.count(b"Lcom/")
     ljava = window.count(b"Ljava/")
+    # aligned_hits only counts the STRONG 4-byte magics (dex, zip): the
+    # 2-byte gzip/zlib magics appear by chance in decrypted garbage at
+    # 16-byte-aligned offsets (~1% per head for a wrong mode/IV), which
+    # once flipped a CI selftest verdict via the CBC-zero-on-ECB path
+    # (run 34280862511).  A 4-byte magic at an aligned offset is real
+    # boundary evidence; a 2-byte one is not.
     aligned_hits = sum(1 for off in range(0, max(0, len(head) - 3), 16)
-                       if magic_name(head, off) is not None)
+                       if magic_name(head, off) in ("dex", "zip"))
     # 'strong' requires the magic AND class-descriptor/boundary evidence:
     # CBC with the wrong IV still decrypts block 0 correctly (P0 = D(C0) ^
     # IV), so a lone magic at offset 0 is NOT proof — the rest of the head
@@ -676,7 +682,10 @@ def _selftest_checks():
 
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        key = os.urandom(16)
+        # DETERMINISTIC key: os.urandom once produced garbage whose
+        # CBC-zero-on-ECB head accidentally met the strong criteria on
+        # CI (run 34280862511) - a selftest must be reproducible.
+        key = bytes(range(16))
 
         # ---- synthetic A: two plain dexes, [len] after each dex
         # dex1 length ≡ 12 mod 16 so dex2 starts at a 16-byte aligned
