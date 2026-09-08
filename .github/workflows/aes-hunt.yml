@@ -1,0 +1,196 @@
+name: "Phase 3b - AES key hunt (freeze-and-sweep, injection-free)"
+
+# Youcine-RE - recover the AES key of assets/ijiami.dat WITHOUT frida.
+#
+# WHY INJECTION-FREE: phase 2 proved the packer's AES is a custom
+# SecLLVM-obfuscated implementation inside libexec.so that never touches
+# the standard crypto entry points capture_aes_key.js hooks (the only
+# captured keys were Java TLS keys - none of them decrypts the dat).
+# iJiami's ptrace anti-debug is irrelevant to this flow: nothing is ever
+# injected into the process.  unpack/aes_hunt_flow.sh:
+#   1. boots the PROVEN native-arm64 redroid environment (same recipe as
+#      frida-redump.yml: build.prop patched before first boot, adbd root),
+#   2. installs the ORIGINAL byte-exact APK from the packed-1.17.6 release
+#      (the content-gated engine must accept it - the key only appears
+#      when the packer actually decrypts),
+#   3. launches the app and SIGSTOP-freezes it ~1.5 s after the pid
+#      appears (ijiami.dat is decrypted in attachBaseContext, long before
+#      any Activity; the freeze also parks the packer's death ladder),
+#   4. sweeps /proc/<pid>/mem regions out via root adb - INCLUDING the
+#      app-native .so mappings (--include-libs: the expanded key schedule
+#      lives in libexec.so's .data/.bss) and keeps them (region files),
+#   5. runs ijiami-static/hunt_key_schedule.py offline (self-tested:
+#      AES key-schedule recurrence verification, partial-schedule
+#      back-walking, FIPS-197 vectors) on the kept regions,
+#   6. runs ijiami-static/decrypt_ijiami_dat.py against the REAL payload
+#      (extracted from the same packed APK): VERIFIED requires DEX magic
+#      + 'Lcom/' density; anything else is FAIL with evidence.
+#
+# WHY runs-on: ubuntu-24.04-arm (DO NOT switch to ubuntu-latest):
+#   the arm64-v8a libexec.so must execute on a REAL aarch64 host -
+#   SecLLVM's self-modifying code dies under ndk_translation (run
+#   34084986538), and the key schedule only exists in memory if the
+#   packer actually ran its decryption.
+#
+# The flow ALWAYS exits 0 (evidence over crash) - the Verdict step below
+# turns a missing/not-verified decryption into a job failure only when
+# the hunt had zero key candidates to try.
+#
+# RESEARCH USE ONLY - see README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_source:
+        description: 'packed APK source: release (packed-1.17.6) or url (SAMPLE_URL secret)'
+        required: false
+        default: 'release'
+      settle:
+        description: 'seconds to settle after the pid appears (decryption window)'
+        required: false
+        default: '1.5'
+      memdump_timeout:
+        description: 'total freeze-and-sweep seconds'
+        required: false
+        default: '150'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aes-hunt
+  cancel-in-progress: false
+
+jobs:
+  aes-hunt:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 50
+    env:
+      APP_ID: com.world.youcinemobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # NOTE: no setup-android - Ubuntu's adb is native arm64; xz/zip/unzip
+      # unpack the artifacts.  Same host-deps recipe as frida-redump.yml.
+      - name: Host deps (adb, xz-utils, zip, unzip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y adb xz-utils zip unzip
+          adb version
+          docker version
+
+      - name: Run the AES key hunt flow
+        env:
+          APK_SOURCE: ${{ github.event.inputs.apk_source || 'release' }}
+          SETTLE: ${{ github.event.inputs.settle || '1.5' }}
+          MEMDUMP_TIMEOUT: ${{ github.event.inputs.memdump_timeout || '150' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash unpack/aes_hunt_flow.sh || true
+
+      - name: Verdict
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          ok = True
+          regions = sorted(pathlib.Path("work/aes-hunt").glob("regions_*"))
+          total = sum(p.stat().st_size for r in regions for p in r.glob("*.bin"))
+          print("[aes-hunt] region sweeps: %d, raw bytes: %.1f MiB"
+                % (len(regions), total / 1048576))
+          if not regions or total < 1024 * 1024:
+              print("[!] no memory regions captured - the sweep never froze the app")
+              ok = False
+
+          cands = pathlib.Path("ijiami-static/out/candidates.json")
+          n_c = 0
+          if cands.is_file():
+              try:
+                  n_c = len(json.loads(cands.read_text()))
+              except Exception as exc:
+                  print("[!] candidates.json unreadable:", exc)
+          print("[aes-hunt] key-schedule candidates: %d" % n_c)
+          if n_c == 0:
+              print("[!] hunt found no AES key schedule - see work/hunt-output.txt")
+              ok = False
+
+          rep = pathlib.Path("ijiami-static/out/report.json")
+          verified = 0
+          if rep.is_file():
+              try:
+                  r = json.loads(rep.read_text())
+                  verified = r.get("verified_count", r.get("verified", 0)) or 0
+              except Exception:
+                  pass
+          print("[aes-hunt] verified decryptions: %d" % verified)
+          if verified > 0:
+              print("[+] AES KEY RECOVERED - ijiami.dat statically decrypted")
+          else:
+              # candidates but no verified decryption: evidence, not failure
+              print("[!] not verified this run - candidates preserved as artifacts")
+
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Package evidence
+        if: always()
+        run: |
+          mkdir -p work/evidence
+          for f in work/hunt-output.txt work/decrypt-output.txt work/decrypt.exit \
+                   work/props-aes.txt work/apk-aes.sha256 work/pm-path-aes.txt \
+                   work/logcat-aes.txt work/docker-aes.txt work/pip-aes.log \
+                   ijiami-static/out/candidates.json ijiami-static/out/report.json \
+                   ijiami-static/out/analyze.json; do
+            [ -f "$f" ] && cp "$f" work/evidence/ || true
+          done
+          # payloads (if the key verified)
+          for f in ijiami-static/out/payload_*; do
+            [ -f "$f" ] && cp "$f" work/evidence/ || true
+          done
+          # regions: cap the evidence at the FIRST sweep (post-decryption
+          # state) - the full set is too big for an artifact
+          if [ -d work/aes-hunt/regions_1 ]; then
+            du -sh work/aes-hunt/* | sort -rh | head -20 > work/evidence/regions-sizes.txt || true
+          fi
+          ls -la work/evidence/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aes-hunt-${{ github.run_id }}
+          path: |
+            work/evidence/
+            work/aes-hunt/regions_1/maps.txt
+            work/aes-hunt/maps_snapshot.txt
+            work/aes-hunt/dex_count.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Publish the recovered key + payloads ONLY on verification.  The
+      # key material goes into the release (private research repo) with
+      # the payloads it unlocked; report.json carries the full keys.
+      - name: Publish ijiami-static release (on verification)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -s ijiami-static/out/report.json ] || \
+             ! python3 -c "import json;r=json.load(open('ijiami-static/out/report.json'));exit(0 if (r.get('verified_count',0) or r.get('verified',0) or 0)>0 else 1)"; then
+            echo "[i] no verified decryption - release skipped"
+            exit 0
+          fi
+          mkdir -p work/release
+          cp ijiami-static/out/candidates.json work/release/ 2>/dev/null || true
+          cp ijiami-static/out/report.json work/release/ 2>/dev/null || true
+          cp ijiami-static/out/payload_* work/release/ 2>/dev/null || true
+          zip -j work/release/ijiami-static-evidence.zip work/hunt-output.txt work/decrypt-output.txt || true
+          gh release create ijiami-static-1.17.6 \
+            --title "ijiami.dat static decryption 1.17.6 (AES key recovered)" \
+            --notes "Injection-free AES key recovery: the app was SIGSTOP-frozen ~1.5 s after launch (ijiami.dat decrypts in attachBaseContext), /proc/pid/mem regions swept via root adb (app .so mappings included - the expanded key schedule lives in libexec.so .data/.bss), key-schedule recurrence verified offline (hunt_key_schedule.py) and the candidate verified against the real payload (decrypt_ijiami_dat.py: DEX magic + Lcom/ density). RESEARCH USE ONLY - see README." \
+            --target "$GITHUB_SHA" || true
+          gh release upload ijiami-static-1.17.6 \
+            work/release/* --clobber || true

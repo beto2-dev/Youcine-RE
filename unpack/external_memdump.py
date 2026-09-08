@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -84,7 +85,7 @@ while IFS= read -r line; do
   case "$path" in
     /apex/*|/system/*|/vendor/*|/product/*|/data/*|/dev/*|/proc/*)
       case "$path" in
-        *dalvik*|*dex*|*memfd*|*cache*) ;;
+        *dalvik*|*dex*|*memfd*|*cache*LIBFILTER*) ;;
         *) continue ;;
       esac
       ;;
@@ -140,8 +141,13 @@ def kill_proc(pid: int) -> None:
     adb_shell(f"kill -9 {pid}", timeout=15)
 
 
-def push_sweep_script() -> None:
+def push_sweep_script(include_libs: bool = False) -> None:
     sweep = SWEEP_SH.replace("MINREGION", str(MIN_REGION))
+    # LIBFILTER: when --include-libs is on, app-native .so mappings are
+    # swept too - the packer's AES context (expanded key schedule) lives
+    # in libexec.so's .data/.bss, a file-backed mapping the stock filter
+    # (dalvik/dex/memfd/cache only) always excludes.
+    sweep = sweep.replace("LIBFILTER", "|*.so" if include_libs else "")
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
         fh.write(sweep)
         path = fh.name
@@ -358,13 +364,25 @@ def main() -> int:
         action="store_true",
         help="sweep the live process without SIGSTOP (e.g. while a frida tracer is attached)",
     )
+    ap.add_argument(
+        "--keep-regions",
+        action="store_true",
+        help="keep the raw swept region files (out-dir/regions_<n>/) for "
+             "offline AES key-schedule hunting (ijiami-static/hunt_key_schedule.py)",
+    )
+    ap.add_argument(
+        "--include-libs",
+        action="store_true",
+        help="also sweep app-native .so mappings (libexec.so .data/.bss: "
+             "the packer cipher context lives there)",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     adb("wait-for-device", timeout=60)
-    push_sweep_script()
+    push_sweep_script(args.include_libs)
 
     seen: dict[str, bytes] = {}
     seen_cdx: set[str] = set()
@@ -372,6 +390,7 @@ def main() -> int:
     start = time.time()
     pid_seen_once = False
     empty_streak = 0
+    sweep_no = 0
 
     while time.time() < deadline:
         pid = pid_of(args.app)
@@ -398,6 +417,20 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="yc_sweep_") as td:
             files = batch_sweep(pid, Path(td))
             print(f"[*] pulled {len(files)} region files", flush=True)
+            if args.keep_regions:
+                sweep_no += 1
+                keep = out_dir / f"regions_{sweep_no}"
+                keep.mkdir(parents=True, exist_ok=True)
+                n_kept = 0
+                total_kept = 0
+                for f in Path(td).iterdir():
+                    if f.suffix == ".bin" or f.name in ("maps.txt", "maps"):
+                        dst = keep / f.name
+                        shutil.copy2(f, dst)
+                        n_kept += 1
+                        total_kept += f.stat().st_size
+                print(f"[*] kept {n_kept} raw region files "
+                      f"({total_kept / (1024 * 1024):.1f} MiB) -> {keep}", flush=True)
             mag = diagnose_magics(files)
             print("[*] magic occurrences: dex=%d cdex=%d vdex=%d"
                   % (mag["dex"], mag["cdex"], mag["vdex"]), flush=True)
