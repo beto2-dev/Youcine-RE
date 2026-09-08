@@ -46,3 +46,4 @@ Thumbs.db
 .vscode/
 .env
 .env.*
+ijiami-static/out/
