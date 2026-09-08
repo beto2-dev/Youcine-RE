@@ -643,6 +643,12 @@ def run_warmup(warm_script, names: list[str]) -> dict:
     stats = {"ok": 0, "notfound": 0, "fail": 0, "errors": []}
     total = len(names)
     note(f"[phase2] warm-up: {total} class names in batches of {WARMUP_BATCH}")
+    # interleaved out-of-proc redump checkpoints: the class-init storm can
+    # crash the app's own materialization engine mid-sweep (run 34190403091:
+    # SIGSEGV inside the app's native code after 21600/32459 classes, all
+    # materialized content lost with the process).  A snapshot every
+    # WARMUP_CHECKPOINT_EVERY chunks keeps the capture crash-proof.
+    checkpoint_every = _env_int("WARMUP_CHECKPOINT_EVERY", 20)
     loaded_pre = rpc_watchdog(warm_script, "loadedcount", (),
                               "loadedcount (pre)", 120.0) \
         if not DETACHED["flag"] else None
@@ -675,6 +681,12 @@ def run_warmup(warm_script, names: list[str]) -> dict:
                 if len(stats["errors"]) < 20:
                     stats["errors"].append(str(e))
         done = i + len(chunk)
+        chunk_no = i // WARMUP_BATCH + 1
+        if chunk_no % checkpoint_every == 0 and not DETACHED["flag"] \
+                and pidof(APP_ID) is not None:
+            note(f"[phase2] warm-up checkpoint {chunk_no}: {done}/{total} "
+                 "classes - redump snapshot (SIGSTOP dump, ~40s)")
+            redump_snapshot(f"warmup-cp{chunk_no}")
         write_warmup_stats(stats, done, total, loaded_pre=loaded_pre)
     loaded_post = None
     if not DETACHED["flag"] and not out_of_budget("loadedcount (post)"):
@@ -845,6 +857,28 @@ def pull_inproc_artifacts() -> None:
         except Exception as e:
             note(f"[phase2] adb pull {remote} failed: {e}")
         merge_move(dst / "youcine_re_phase2", dst)
+
+
+def redump_snapshot(tag: str) -> int:
+    """Out-of-proc pread64 dump of the app's DEX spans (SIGSTOP-based,
+    safe to run mid-warm-up: the app is idle from our side between
+    chunks).  Writes into OUT/redump; repeated snapshots overwrite the
+    span files - the validate step picks whatever is valid at the end."""
+    here = Path(__file__).resolve().parent
+    repo = here.parent
+    app_pid = pidof(APP_ID)
+    if app_pid is None:
+        note(f"[phase2] {tag}: app is dead - no snapshot")
+        return 1
+    cmd = [sys.executable, str(here / "dexdata_extract.py"),
+           "--app", APP_ID, "--out-dir", str(OUT / "redump")]
+    memread = repo / "tools" / "memread"
+    if memread.exists():
+        cmd += ["--memread", str(memread)]
+    rc = run_step_subprocess(cmd, f"dexdata[{tag}]", 900.0)
+    if pidof(APP_ID) is None:
+        note(f"[phase2] {tag}: app died during the snapshot - continuing")
+    return rc
 
 
 def run_step_subprocess(cmd: list[str], tag: str, timeout: float) -> int:
@@ -1058,26 +1092,15 @@ def main() -> int:
     # -- step 13: AUTHORITATIVE out-of-process re-dump -------------------
     # in-proc reads cannot cross the -wxp no-read pieces of the DEX spans;
     # pread64 with FOLL_FORCE can (dexdata_extract.py SIGSTOPs the app
-    # itself and SIGCONTs at the end)
+    # itself and SIGCONTs at the end).  The warm-up checkpoints already
+    # dumped snapshots; this final pass catches the fully-warmed state
+    # when the app survived.
     redump_rc = None
-    app_pid = pidof(APP_ID)
-    if app_pid is None:
-        note("[!] app is dead - skipping out-of-proc redump "
-             "(in-proc artifacts only)")
+    if pidof(APP_ID) is None:
+        note("[!] app is dead - skipping the final redump "
+             "(the warm-up checkpoint snapshots survive)")
     else:
-        cmd = [sys.executable, str(here / "dexdata_extract.py"),
-               "--app", APP_ID, "--out-dir", str(OUT / "redump")]
-        memread = repo / "tools" / "memread"
-        if memread.exists():
-            # absolute path: robust regardless of the driver's CWD
-            cmd += ["--memread", str(memread)]
-        else:
-            note("[!] tools/memread missing - dexdata_extract.py will "
-                 "report the same (compile tools/memread.c)")
-        redump_rc = run_step_subprocess(cmd, "dexdata", 900.0)
-        if pidof(APP_ID) is None:
-            note("[phase2] app died during the redump "
-                 "(dexdata SIGSTOP/CONT cycle) - continuing")
+        redump_rc = redump_snapshot("final")
 
     # -- step 14: repair / validate into canonical classes*.dex ----------
     vcmd = [sys.executable, str(here / "validate_and_extract_dex.py"),
