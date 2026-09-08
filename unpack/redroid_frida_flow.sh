@@ -558,9 +558,13 @@ fi
 adb -s "$DEV" logcat -d -b main,system,crash > work/logcat-boot-phase2.txt 2>&1 || true
 adb -s "$DEV" logcat -c >/dev/null 2>&1 || true
 DRIVER_RC=0
+# PHASE2_MODE=matrix: rounds 1-4 all die the same way; the matrix probe
+# determines WHICH instrumentation layer trips iJiami's death ladder
+# (spawn-gate / agent presence / libc hooks / ptrace replace / crypto
+# hooks / libart hooks / full config) before the capture pipeline runs.
 ANDROID_SERIAL="$DEV" APP_ID="$APP_ID" FRIDA_REMOTE="127.0.0.1:4789" \
   DEX_DIR="work/dumps-dex" OUT_DIR="work/phase2" \
-  GUARD_SCRIPTS="$PHASE2_GUARDS" \
+  GUARD_SCRIPTS="$PHASE2_GUARDS" PHASE2_MODE="matrix" \
   python3 unpack/frida_phase2_driver.py || DRIVER_RC=$?
 echo "phase-2 driver exit code: $DRIVER_RC"
 echo "$DRIVER_RC" > work/phase2-driver.exit || true

@@ -84,6 +84,8 @@ REG_QUIET = _env_int("REG_QUIET", 12)
 WARMUP_BATCH = _env_int("WARMUP_BATCH", 200)
 PHASE2_TIMEOUT = _env_int("PHASE2_TIMEOUT", 900)
 GUARD_SCRIPTS = _env("GUARD_SCRIPTS", "02_bypass_ptrace.js")
+PHASE2_MODE = _env("PHASE2_MODE", "capture")      # capture | matrix
+PROBE_WAIT = _env_int("PROBE_WAIT", 8)              # matrix level wait
 
 START = time.time()
 DEADLINE = START + PHASE2_TIMEOUT
@@ -132,6 +134,150 @@ def reload_scripts(session, load_names):
         except Exception as e:
             note(f"[!] loading {name} failed: {e}")
     return scripts
+
+
+# ---------------------------------------------------------------------------
+def adb_shell(cmd: str, timeout: float = 30.0) -> str:
+    try:
+        r = subprocess.run([ADB, "shell", cmd], capture_output=True,
+                           text=True, timeout=timeout)
+        return (r.stdout or "").strip()
+    except Exception as e:
+        note(f"[!] adb shell {cmd!r} failed: {e}")
+        return ""
+
+
+EMPTY_SCRIPT = """/* no-op probe script: hooks NOTHING, reports that it is
+ * alive every second so the driver can tell 'script running' from
+ * 'session dead'. */
+'use strict';
+var n = 0;
+setInterval(function () {
+  try { send({ type: 'probe_alive', tick: n++ }); } catch (e) {}
+}, 1000);
+"""
+
+
+MATRIX_LEVELS = [
+    (0, "spawn-gate only (no attach)", []),
+    (1, "+ attach + empty script (agent presence)",
+     ["@empty"]),
+    (2, "+ 09_hide_frida.js (libc inline hooks)",
+     ["@empty", "09_hide_frida.js"]),
+    (3, "+ 02_bypass_ptrace.js (ptrace replace)",
+     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js"]),
+    (4, "+ capture_aes_key.js (crypto hooks)",
+     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
+      "capture_aes_key.js"]),
+    (5, "+ 06_register_natives_table.js (libart hooks)",
+     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
+      "capture_aes_key.js", "06_register_natives_table.js"]),
+    (6, "+ 07/08 (full failing config)",
+     ["@empty", "09_hide_frida.js", "02_bypass_ptrace.js",
+      "capture_aes_key.js", "06_register_natives_table.js",
+      "07_class_warmup.js", "08_redump_dex.js"]),
+]
+
+
+def probe_matrix(device, scripts_dir) -> list:
+    """Determine which instrumentation layer trips iJiami's death ladder.
+    Every level starts from a CLEAN app state (am force-stop + pm clear) -
+    pm clear also wipes any on-disk tamper flag a previous level could
+    have left.  A final L0 control re-run tells whether a persistent flag
+    survived the clears (or the app simply crash-looped itself)."""
+    results = []
+    try:
+        mgr = frida.get_device_manager()
+        device = mgr.add_remote_device(FRIDA_REMOTE)
+    except Exception as e:
+        note(f"[matrix] frida device failed: {e}")
+        return [{"level": -1, "error": str(e)}]
+
+    for level, desc, script_names in MATRIX_LEVELS:
+        entry = {"level": level, "desc": desc, "status": "?",
+                 "seconds": 0.0}
+        t0 = time.time()
+        # clean state
+        adb_shell(f"am force-stop {APP_ID}", 15)
+        adb_shell(f"pm clear {APP_ID}", 30)
+        time.sleep(1.5)
+        try:
+            pid = device.spawn([APP_ID])
+        except Exception as e:
+            entry["status"] = f"spawn-failed: {e}"
+            results.append(entry)
+            continue
+        session = None
+        detached = {"flag": False}
+        if level >= 1:
+            try:
+                session = device.attach(pid)
+
+                def _on_det(reason, *a, _d=detached):
+                    _d["flag"] = True
+                session.on("detached", _on_det)
+                for name in script_names:
+                    source = EMPTY_SCRIPT if name == "@empty" else \
+                        (scripts_dir / name).read_text(encoding="utf-8")
+                    s = session.create_script(source)
+                    s.on("message", on_message)
+                    s.load()
+            except Exception as e:
+                entry["status"] = f"attach/load-failed: {e}"
+                results.append(entry)
+                try:
+                    device.resume(pid)
+                except Exception:
+                    pass
+                continue
+        try:
+            device.resume(pid)
+        except Exception as e:
+            entry["status"] = f"resume-failed: {e}"
+        # watch the level for PROBE_WAIT seconds
+        while time.time() - t0 < PROBE_WAIT:
+            if detached["flag"]:
+                break
+            time.sleep(0.5)
+        now = pidof(APP_ID)
+        if now is None:
+            entry["status"] = "dead"
+        elif now == pid:
+            entry["status"] = "alive"
+        else:
+            entry["status"] = f"restarted (pid {pid} -> {now})"
+        entry["seconds"] = round(time.time() - t0, 1)
+        entry["pid"] = pid
+        results.append(entry)
+        note(f"[matrix] L{level} [{desc}] -> {entry['status']} "
+             f"({entry['seconds']}s)")
+        # teardown
+        try:
+            if session is not None:
+                session.detach()
+        except Exception:
+            pass
+        adb_shell(f"am force-stop {APP_ID}", 15)
+
+    # control: one more clean L0 (detects persistent flags / crash loops)
+    adb_shell(f"pm clear {APP_ID}", 30)
+    time.sleep(1.5)
+    try:
+        pid = device.spawn([APP_ID])
+        device.resume(pid)
+        time.sleep(PROBE_WAIT)
+        now = pidof(APP_ID)
+        ctrl = {"level": 0, "desc": "CONTROL re-run (spawn only, after all "
+                                    "levels + pm clear)",
+                "status": "dead" if now is None else
+                          ("alive" if now == pid else f"restarted ({now})"),
+                "pid": pid}
+        results.append(ctrl)
+        note(f"[matrix] control -> {ctrl['status']}")
+        adb_shell(f"am force-stop {APP_ID}", 15)
+    except Exception as e:
+        results.append({"level": 0, "desc": "CONTROL", "error": str(e)})
+    return results
 
 
 def try_reattach(device, load_names, old_session, old_scripts, reattaches):
@@ -677,6 +823,27 @@ def main() -> int:
                 return 1
         else:
             load_names.append((name, path))
+
+    # -- optional: detection-matrix probe BEFORE the capture pipeline -----
+    # Rounds 34171467849/34172332498/34172614416/34173015540 all die the
+    # same way (RegisterNatives withheld -> UnsatisfiedLinkError N.al ->
+    # kill/_exit ladder) despite maps/port/thread renaming.  The matrix
+    # determines WHICH instrumentation layer trips the ladder by spawning
+    # the app with cumulatively more instrumentation and a clean app state
+    # (am force-stop + pm clear) between levels:
+    #   L0 spawn-gate only (no attach, no scripts)
+    #   L1 + attach + an empty no-op script          (agent presence)
+    #   L2 + 09_hide_frida.js                        (libc inline hooks)
+    #   L3 + 02_bypass_ptrace.js                     (ptrace replacement)
+    #   L4 + capture_aes_key.js                      (crypto inline hooks)
+    #   L5 + 06_register_natives_table.js            (libart inline hooks)
+    #   L6 + 07/08                                   (the failing config)
+    # A final L0 re-run (control) detects persistent on-disk tamper flags.
+    if PHASE2_MODE == "matrix":
+        matrix_results = probe_matrix(device=None, scripts_dir=scripts_dir)
+        (OUT / "matrix.json").write_text(
+            json.dumps(matrix_results, indent=2) + "\n", encoding="utf-8")
+        note(f"[phase2] matrix results: {json.dumps(matrix_results)}")
 
     # -- step 3: remote device, spawn gated, attach ----------------------
     try:
