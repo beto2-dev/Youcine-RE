@@ -639,7 +639,7 @@ def write_warmup_stats(stats: dict, done: int, total: int,
         note(f"[phase2] warmup_stats write failed: {e}")
 
 
-def run_warmup(warm_script, names: list[str]) -> dict:
+def run_warmup(warm_script, rn_script, names: list[str]) -> dict:
     stats = {"ok": 0, "notfound": 0, "fail": 0, "errors": []}
     total = len(names)
     note(f"[phase2] warm-up: {total} class names in batches of {WARMUP_BATCH}")
@@ -1082,7 +1082,7 @@ def main() -> int:
 
     # -- step 9: warm-up sweep -------------------------------------------
     if warm_script is not None and names:
-        warm_stats = run_warmup(warm_script, names)
+        warm_stats = run_warmup(warm_script, rn_script, names)
     else:
         warm_stats = {"ok": 0, "notfound": 0, "fail": 0, "errors": []}
         if warm_script is None:
