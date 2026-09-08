@@ -353,6 +353,20 @@ xz -d -f work/fs.xz || {
   echo "::error::xz -d work/fs.xz failed (xz-utils missing on the host?)"
   exit 1
 }
+# STEALTH PATCH (run 34172614416 post-mortem): iJiami's SecLLVM VMP reads
+# /proc/self/maps and kills itself with RAW SVC syscalls that bypass every
+# libc-level hook (09_hide_frida.js only covers libc).  The same-length
+# byte swaps below rename the agent memfd (frida-agent-<arch>.so ->
+# media-agent-<arch>.so), the helper process names and the agent thread
+# names (gum-js-loop/gmain/gdbus) AT THE SOURCE, so even a raw maps scan
+# finds no frida signature.  || true: a patcher failure degrades to the
+# stock binary and the capture continues.
+if [ -f tools/stealth_frida_server.py ]; then
+  python3 tools/stealth_frida_server.py work/fs \
+    || echo "::warning::stealth patch failed - using the stock frida-server"
+else
+  echo "::warning::tools/stealth_frida_server.py missing - stock frida-server"
+fi
 chmod 755 work/fs
 ls -l work/fs || true
 # randomized on-device name (iJiami scans /proc/*/cmdline + maps for the
@@ -472,6 +486,18 @@ adb -s "$DEV" install -r -g work/packed.apk || {
   }
 }
 adb -s "$DEV" shell pm path "$APP_ID" | tee work/pm-path-phase2.txt || true
+# kernel-level port probe block (defense in depth for the RAW-SVC connect:
+# a raw connect(2) to the frida port bypasses the 09 libc hook; iptables
+# REJECT for the app uid makes the probe fail even then).  Best-effort -
+# if the image lacks iptables or the owner match, we continue without it.
+APP_UID="$(adb -s "$DEV" shell "stat -c %u /data/data/$APP_ID 2>/dev/null" | tr -d '\r' | head -1)"
+if [ -n "$APP_UID" ] && [ "$APP_UID" != "0" ]; then
+  adb -s "$DEV" shell "iptables -A OUTPUT -p tcp --dport $FRIDA_PORT -m owner --uid-owner $APP_UID -j REJECT" \
+    && echo "iptables: app uid $APP_UID cannot connect to frida port $FRIDA_PORT" \
+    || echo "::warning::iptables REJECT unavailable - raw port probes stay possible (libc connect hook still active)"
+else
+  echo "::warning::could not resolve the app uid - skipping the iptables port block"
+fi
 adb -s "$DEV" shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi|nativeLibraryDir' | head -6" \
   | tee work/abi-info-phase2.txt || true
 # the install-retry reconnect may have dropped the forward - re-establish
