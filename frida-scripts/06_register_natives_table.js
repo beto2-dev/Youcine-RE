@@ -16,15 +16,20 @@
  * back to its Java-visible declaration (open-source families get Java
  * bodies; the vendor's 424 need a registrar shim).
  *
- * HOW: primary = hook the art::JNI<false/true>::RegisterNatives symbols in
- * libart.so (mangled _ZN3art...RegisterNatives..., dedup by address so the
- * fast and CheckJNI variants of the same address collapse).  Fallback if
- * libart carries no such symbols (stripped) = the JNIEnv function table:
- * *env is a JNINativeInterface* (the first field of JNIEnv), and
- * RegisterNatives sits at table slot 215.  Index 215 documented from the
- * JNI spec's JNINativeInterface layout (0-based): 4 reserved pointers at
- * 0..3, GetVersion at 4, ... RegisterNatives at 215, table ends at
- * GetObjectRefType (232).
+ * HOW (run 34175381036 matrix verdict): Interceptor.attach on the
+ * art::JNI::RegisterNatives function body - via symbol scan OR via the
+ * vtable-resolved address - is an INLINE CODE PATCH on libart.so and
+ * iJiami's VMP integrity-checks libart's code and kills the process
+ * (L4: agent+06 = dead; agent alone = alive).  libart's CODE is never
+ * touched here: the shared JNINativeInterface function table (reachable
+ * as *env, i.e. the first field of any JNIEnv) has RegisterNatives at
+ * slot 215 (JNI spec table, 0-based, 4 reserved -> GetVersion@4 ->
+ * ... -> RegisterNatives@215 -> GetObjectRefType@232).  We copy nothing
+ * and patch nothing in code - we mprotect the ONE table slot writable
+ * and swap the function POINTER for a NativeCallback that parses the
+ * JNINativeMethod array, records it, and forwards to the original.
+ * That is a pure DATA modification - invisible to the prologue checksum
+ * the packer runs on executable pages.
  *
  * The JNINativeMethod array (arg 2) is {const char* name; const char*
  * signature; void* fnPtr} - 3 pointers per entry, count in arg 3.  libexec
@@ -39,11 +44,12 @@
 
 var TARGET = 'com.world.youcinemobile';
 var activated = false;
+var SLOT = 215;      // JNINativeInterface.RegisterNatives
 
 // className -> { 'name|sig' -> rec } (plain objects: ES5-safe + JSON-able;
 // Map would break ancient duktape-based frida runtimes)
 var RN = {};
-var JClass = null; // cached java.lang.Class wrapper for onEnter casts
+var JClass = null; // cached java.lang.Class wrapper for name casts
 
 function log(msg) {
   console.log('[rn] ' + msg);
@@ -88,140 +94,113 @@ function totalMethods() {
   return n;
 }
 
-function attachRegisterNatives(addr, label) {
+/* Parse + record a JNINativeMethod array; runs INSIDE our replacement
+ * callback, on the REGISTERING thread (which is JNI-attached by
+ * definition - it is calling a JNI function right now), so Java.cast on
+ * the jclass is legal.  Returns the row records for the send() event. */
+function parseMethods(env, jclass, methods, count) {
+  var recs = [];
+  var className = 'jclass@' + jclass;
   try {
-    Interceptor.attach(addr, {
-      onEnter: function (args) {
-        // Runs on the REGISTERING thread, which is JNI-attached by
-        // definition (it is calling a JNI function right now), so
-        // Java.cast on the jclass is legal.
-        try {
-          this.rnClass = null;
-          var count = args[3].toInt32();
-          var className = 'jclass@' + args[1];
-          try {
-            className = String(Java.cast(args[1], JClass).getName());
-          } catch (ce) {
-            // Java bridge not ready / not a Class yet: keep the raw form
-          }
-          this.rnClass = className;
-          // sanity: a garbage count means a garbage pointer - never touch it
-          if (!(count > 0 && count <= 10000)) {
-            log('skipping ' + label + ' count=' + count + ' class=' + className);
-            return;
-          }
-          var ps = Process.pointerSize;
-          var recs = [];
-          for (var i = 0; i < count; i++) {
-            try {
-              var base = args[2].add(i * 3 * ps);
-              var namePtr = base.readPointer();
-              var sigPtr = base.add(ps).readPointer();
-              var fnPtr = base.add(2 * ps).readPointer();
-              if (namePtr.isNull() || sigPtr.isNull() || fnPtr.isNull()) {
-                continue;
-              }
-              var name = namePtr.readCString();
-              var sig = sigPtr.readCString();
-              if (name === null || sig === null) {
-                continue;
-              }
-              var mod = Process.findModuleByAddress(fnPtr);
-              var rec = {
-                name: name,
-                sig: sig,
-                fn: String(fnPtr),
-                mod: mod ? mod.name : '<anon>',
-                off: mod ? '0x' + fnPtr.sub(mod.base).toString(16) : '?'
-              };
-              record(className, rec);
-              recs.push(rec);
-            } catch (e) {
-              // one bad row must not kill the remaining count-1 rows
-            }
-          }
-          send({ type: 'rn', class: className, count: count, methods: recs });
-        } catch (e) {
-          log('onEnter: ' + e);
-        }
-      },
-      onLeave: function (retval) {
-        try {
-          var r = retval.toInt32();
-          if (r !== 0) {
-            send({
-              type: 'rn_warn',
-              ret: r,
-              class: this.rnClass || '?',
-              via: label
-            });
-          }
-        } catch (e) {
-          // never crash the caller on the way out
-        }
-      }
-    });
-    log('hooked RegisterNatives via ' + label + ' @ ' + addr);
-    return true;
-  } catch (e) {
-    log('attach failed ' + label + ' @ ' + addr + ': ' + e);
-    return false;
+    className = String(Java.cast(jclass, JClass).getName());
+  } catch (ce) {
+    // Java bridge not ready / not a Class yet: keep the raw form
   }
+  // sanity: a garbage count means a garbage pointer - never touch it
+  if (!(count > 0 && count <= 10000)) {
+    log('skipping count=' + count + ' class=' + className);
+    return recs;
+  }
+  var ps = Process.pointerSize;
+  for (var i = 0; i < count; i++) {
+    try {
+      var base = methods.add(i * 3 * ps);
+      var namePtr = base.readPointer();
+      var sigPtr = base.add(ps).readPointer();
+      var fnPtr = base.add(2 * ps).readPointer();
+      if (namePtr.isNull() || sigPtr.isNull() || fnPtr.isNull()) {
+        continue;
+      }
+      var name = namePtr.readCString();
+      var sig = sigPtr.readCString();
+      if (name === null || sig === null) {
+        continue;
+      }
+      var mod = Process.findModuleByAddress(fnPtr);
+      var rec = {
+        name: name,
+        sig: sig,
+        fn: String(fnPtr),
+        mod: mod ? mod.name : '<anon>',
+        off: mod ? '0x' + fnPtr.sub(mod.base).toString(16) : '?'
+      };
+      record(className, rec);
+      recs.push(rec);
+    } catch (e) {
+      // one bad row must not kill the remaining count-1 rows
+    }
+  }
+  send({ type: 'rn', class: className, count: count, methods: recs });
+  return recs;
+}
+
+/* Swap JNINativeInterface slot 215 for our NativeCallback.  The table is
+ * SHARED by every JNIEnv of the VM, so one swap covers all threads. */
+function patchVtableSlot() {
+  var env = Java.vm.getEnv();
+  var ps = Process.pointerSize;
+  var table = env.handle.readPointer();      // *env == JNINativeInterface*
+  var slotAddr = table.add(SLOT * ps);
+  var original = slotAddr.readPointer();
+  if (original.isNull()) {
+    throw new Error('slot ' + SLOT + ' is NULL');
+  }
+  var forward = new NativeFunction(
+    original, 'int', ['pointer', 'pointer', 'pointer', 'int']);
+  Memory.protect(slotAddr, ps, 'rw-');
+  slotAddr.writePointer(new NativeCallback(
+    function (jniEnv, jclass, methods, n) {
+      var ret = 0;
+      try {
+        var count = n;
+        try {
+          count = n.toInt32();
+        } catch (te) {
+          /* older runtimes pass a raw number */
+        }
+        parseMethods(jniEnv, jclass, methods, count);
+      } catch (e) {
+        // NEVER crash the registering thread
+        try { log('callback: ' + e); } catch (le) {}
+      }
+      try {
+        ret = forward(jniEnv, jclass, methods, n);
+        if (ret !== 0) {
+          send({ type: 'rn_warn', ret: ret, via: 'vtable[215]' });
+        }
+      } catch (e) {
+        try { log('forward: ' + e); } catch (le) {}
+      }
+      return ret;
+    },
+    'int', ['pointer', 'pointer', 'pointer', 'int']));
+  log('vtable slot ' + SLOT + ' swapped: original ' + original +
+      ' -> callback (libart code untouched)');
+  return true;
 }
 
 function installHooks() {
-  var hooked = 0;
+  var ok = false;
   try {
-    var libart = Process.getModuleByName('libart.so');
-    var seen = {}; // address -> true: dedup (CheckJNI may alias the impl)
-    var syms = libart.enumerateSymbols();
-    for (var i = 0; i < syms.length; i++) {
-      var s = syms[i];
-      if (!s || !s.name) {
-        continue;
-      }
-      if (s.name.indexOf('_ZN3art') !== 0) {
-        continue;
-      }
-      if (s.name.indexOf('RegisterNatives') < 0) {
-        continue;
-      }
-      if (s.type && s.type !== 'function' && s.type !== 'unknown') {
-        continue;
-      }
-      var key = String(s.address);
-      if (seen[key]) {
-        continue;
-      }
-      seen[key] = true;
-      if (attachRegisterNatives(s.address, s.name)) {
-        hooked++;
-      }
-    }
+    ok = patchVtableSlot();
   } catch (e) {
-    log('libart symbol scan: ' + e);
-  }
-  if (hooked === 0) {
-    // FALLBACK: hook slot 215 of the JNIEnv function table directly.
-    // *env (the first field of JNIEnv) is the JNINativeInterface* table;
-    // RegisterNatives is table index 215 (JNI spec function table).
-    try {
-      log('no libart RegisterNatives symbols - using JNIEnv table slot 215');
-      var env = Java.vm.getEnv();
-      var table = env.handle.readPointer();
-      var ps = Process.pointerSize;
-      var fn = table.add(215 * ps).readPointer();
-      if (attachRegisterNatives(fn, 'JNIEnv[215]')) {
-        hooked++;
-      }
-    } catch (e) {
-      log('JNIEnv table fallback: ' + e);
-    }
+    log('vtable slot swap failed: ' + e);
   }
   try {
-    send({ type: 'rn_ready', hooked: hooked });
+    send({ type: 'rn_ready', hooked: ok ? 1 : 0, mode: 'vtable-slot' });
   } catch (se) {}
-  log('installHooks: ' + hooked + ' RegisterNatives hook(s) live');
+  log('installHooks: ' + (ok ? 'RegisterNatives capture live (data-only)' :
+      'FAILED'));
 }
 
 function activate() {
@@ -247,47 +226,51 @@ function activate() {
   });
 }
 
-setImmediate(activate);
-setInterval(activate, 500);
+setImmediate(function () {
+  try {
+    activate();
+  } catch (e) {
+    log('activate: ' + e);
+  }
+});
 
+// late re-arm: the gate runs before the app's classloader exists; if the
+// first attempt failed for timing reasons try once more after 10s
+setTimeout(function () {
+  try {
+    if (!activated) {
+      activate();
+    }
+  } catch (e) {
+    log('re-arm: ' + e);
+  }
+}, 10000);
+
+/* rpc surface consumed by unpack/frida_phase2_driver.py */
 rpc.exports = {
   count: function () {
-    try {
-      return totalMethods();
-    } catch (e) {
-      return 0;
-    }
+    return totalMethods();
   },
   classes: function () {
-    try {
-      var n = 0;
-      for (var cls in RN) {
-        if (Object.prototype.hasOwnProperty.call(RN, cls)) n++;
-      }
-      return n;
-    } catch (e) {
-      return 0;
+    var out = [];
+    for (var cls in RN) {
+      if (Object.prototype.hasOwnProperty.call(RN, cls)) out.push(cls);
     }
+    return out;
   },
   table: function () {
-    // plain JSON-able {className: [{name, sig, fn, mod, off}]}
     var out = {};
-    try {
-      for (var cls in RN) {
-        if (!Object.prototype.hasOwnProperty.call(RN, cls)) {
-          continue;
-        }
+    for (var cls in RN) {
+      if (Object.prototype.hasOwnProperty.call(RN, cls)) {
+        var rows = [];
         var bucket = RN[cls];
-        var arr = [];
         for (var k in bucket) {
           if (Object.prototype.hasOwnProperty.call(bucket, k)) {
-            arr.push(bucket[k]);
+            rows.push(bucket[k]);
           }
         }
-        out[cls] = arr;
+        out[cls] = rows;
       }
-    } catch (e) {
-      log('table: ' + e);
     }
     return out;
   }
