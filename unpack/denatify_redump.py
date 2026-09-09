@@ -642,9 +642,11 @@ def parse_dex_headers(path: Path) -> tuple[int, int, int]:
 def patch_smali_file(path: Path, bodies: dict, report: dict,
                      supers: dict, ctor_protos: dict,
                      framework_ctors: dict,
-                     bad_ctor_classes: set) -> None:
+                     bad_ctor_classes: set,
+                     vendor_bodies: dict | None = None) -> None:
     """Rewrite every native method declaration in one .smali file, inject
     super-calls into un-materialized ctor stubs, and shield run() bodies."""
+    vendor_bodies = vendor_bodies or {}
     text = path.read_text(encoding="utf-8")
     lines = text.split("\n")
     cls_m = CLASS_RE.search(text)
@@ -789,9 +791,24 @@ def patch_smali_file(path: Path, bodies: dict, report: dict,
             i = j + 1
             continue
 
-        # ---- native de-natify: KEEP(real bodies)/STUB(defaults) ----
+        # ---- native de-natify: KEEP / REAL / VENDOR-SYNTH / STUB ----
         if is_native:
-            if key in bodies:
+            if key in vendor_bodies:
+                # VENDOR-SYNTH: reconstructed bodies for the boot-path
+                # VMP natives (the 'registrar shim for the vendor's 424'
+                # the docs left open).  Provenance: reconstructed from
+                # the crash chain + the materialized contract classes,
+                # NOT upstream-verified like the REAL set.
+                body = vendor_bodies[key]
+                new_header = header.replace(" native ", " ", 1)
+                if new_header == header:
+                    new_header = re.sub(r"\bnative\b\s*", "", header, count=1)
+                out.append(new_header)
+                out.extend(block)          # annotations, if any
+                out.append(body.rstrip("\n"))
+                out.append(end_line)
+                report["vendor"].append(key)
+            elif key in bodies:
                 body = bodies[key]
                 new_header = header.replace(" native ", " ", 1)
                 if new_header == header:
@@ -880,6 +897,10 @@ def main() -> int:
                     help="booteable winners (classes.dex..classesN.dex)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--bodies", default=str(here / "denatify_bodies.json"))
+    ap.add_argument("--vendor-bodies", default=str(here / "vendor_bodies.json"),
+                    help="reconstructed bodies for boot-path VMP natives "
+                         "(the registrar shim layer; provenance = crash "
+                         "chain + materialized contracts)")
     ap.add_argument("--apktool", default="work/apktool.jar")
     ap.add_argument("--framework-ctors", default="",
                     help="JSON {class: [accessible <init> protos]} from "
@@ -896,6 +917,11 @@ def main() -> int:
         return 1
     bodies = json.loads(Path(args.bodies).read_text(encoding="utf-8"))
     bodies = {k: v for k, v in bodies.items() if not k.startswith("_")}
+    vpath = Path(args.vendor_bodies)
+    vendor_bodies = json.loads(vpath.read_text(encoding="utf-8")) \
+        if vpath.is_file() else {}
+    vendor_bodies = {k: v for k, v in vendor_bodies.items()
+                     if not k.startswith("_")}
 
     def canon(p: Path) -> int:
         s = p.stem
@@ -927,6 +953,7 @@ def main() -> int:
         cls_pre, m_pre, n_pre = parse_dex_headers(dex)
         report = {"dex": dex.name, "real": [], "stub": [],
                   "keep": [], "guard": [], "shield": [], "kill": [],
+                  "vendor": [],
                   "ctorfix": {"forward": [], "noarg": [], "defaults": [],
                               "left": []}}
         with tempfile.TemporaryDirectory(prefix="denatify_") as td:
@@ -950,7 +977,7 @@ def main() -> int:
                     continue
                 patch_smali_file(smali, bodies, report, cmap.supers,
                                  cmap.ctor_protos, framework_ctors,
-                                 bad_ctor_classes)
+                                 bad_ctor_classes, vendor_bodies)
                 count += 1
             data = apktool_build_dex(apktool, decoded, workdir)
         (out_dir / dex.name).write_bytes(data)
@@ -968,6 +995,7 @@ def main() -> int:
             "bad_ctors_in": len(dex_bad_in),
             "bad_ctors_out": len(out_cmap.bad_ctors),
             "real": len(report["real"]),
+            "vendor": len(report["vendor"]),
             "stub": len(report["stub"]),
             "keep": len(report["keep"]),
             "guard": len(report["guard"]),
@@ -979,7 +1007,8 @@ def main() -> int:
             "ctorfix_left": len(report["ctorfix"]["left"]),
         }
         full_report["dexes"].append(entry)
-        print(f"    real={entry['real']} stub={entry['stub']} "
+        print(f"    real={entry['real']} vendor={entry['vendor']} "
+              f"stub={entry['stub']} "
               f"keep={entry['keep']} guard={entry['guard']} "
               f"shield={entry['shield']} kill={entry['kill']} "
               f"ctorfix(f/n/d)={entry['ctorfix_forward']}/"
@@ -1016,6 +1045,7 @@ def main() -> int:
     # aggregate
     full_report["totals"] = {
         "real": sum(d["real"] for d in full_report["dexes"]),
+        "vendor": sum(d["vendor"] for d in full_report["dexes"]),
         "stub": sum(d["stub"] for d in full_report["dexes"]),
         "keep": sum(d["keep"] for d in full_report["dexes"]),
         "guard": sum(d["guard"] for d in full_report["dexes"]),
@@ -1036,7 +1066,8 @@ def main() -> int:
         print("[!] DE-NATIFY FAILED verification", flush=True)
         return 1
     t = full_report["totals"]
-    print(f"[+] de-natify OK: real={t['real']} stubbed={t['stub']} "
+    print(f"[+] de-natify OK: real={t['real']} vendor-synth={t['vendor']} "
+          f"stubbed={t['stub']} "
           f"kept-native={t['keep']} guarded-clinit={t['guard']} "
           f"shielded-run={t['shield']} killed-clinit={t['kill']} "
           f"ctorfix(f/n/d/l)={t['ctorfix_forward']}/{t['ctorfix_noarg']}/"

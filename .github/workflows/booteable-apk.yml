@@ -139,6 +139,7 @@ jobs:
             --dex-dir  work/booteable-dexes \
             --out-dir  work/denatified-dexes \
             --bodies   unpack/denatify_bodies.json \
+            --vendor-bodies unpack/vendor_bodies.json \
             --apktool  "$APKTOOL_JAR" \
             --framework-ctors work/framework-ctors.json
           ls -la work/denatified-dexes/

@@ -1,0 +1,4 @@
+{
+  "_comment": "VENDOR-SYNTH: reconstructed bodies for the boot-path VMP natives (the 'registrar shim for the vendor's 424' docs/en/06 left open). Provenance per body: the crash chain of the CI boot tests + the MATERIALIZED contract classes around each native - NOT upstream-verified like denatify_bodies.json (Aria). Each key is '<class>|<method>|<proto>'; smali inserted verbatim after the de-natified .method header.",
+  "Lcom/mobile/brasiltv/activity/SplashAty;|configView|()V": "    .locals 1\n\n    new-instance v0, Lcom/mobile/brasiltv/mvp/presenter/s6;\n\n    invoke-direct {v0, p0, p0}, Lcom/mobile/brasiltv/mvp/presenter/s6;-><init>(Lcom/mobile/brasiltv/activity/c;Lw5/h1;)V\n\n    invoke-virtual {p0, v0}, Lcom/mobile/brasiltv/activity/SplashAty;->y4(Lcom/mobile/brasiltv/mvp/presenter/s6;)V\n\n    return-void\n"
+}
