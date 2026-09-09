@@ -109,6 +109,12 @@ jobs:
             # am start -W blocked 48 min until the job timeout).  A hung
             # launch must become evidence, not a stuck job.
             timeout 90 adb shell am start -W -n $APP_ID/$LAUNCH > work/am_start.txt 2>&1 || echo "AM_START_TIMEOUT: launch never completed (app hung, not crashed)" >> work/am_start.txt
+            # adb root: the SIGQUIT dumps land in /data/anr/*.txt which plain
+            # shell cannot read (permission denied) - without root the ANR
+            # evidence never reaches the artifacts.  google_apis allows it;
+            # wait-for-device rides out the brief adbd restart.
+            adb root > /dev/null 2>&1 || true
+            adb wait-for-device || true
             # kill -3 (SIGQUIT) = full ANR thread dump of every Java
             # thread -> logcat: WHERE the main thread is parked.
             # NOTE: android-emulator-runner runs EACH LINE in its own
@@ -131,7 +137,7 @@ jobs:
             adb shell "cat /data/anr/*.txt 2>/dev/null" > work/anr_traces.txt 2>/dev/null || true
             adb shell "run-as $APP_ID ls files 2>/dev/null" > work/data_ls.txt 2>/dev/null || true
             grep -c "com.mobile.brasiltv" work/activities.txt > work/real_app_refs.txt || echo 0 > work/real_app_refs.txt || true
-            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption" work/logcat.txt > work/crash_lines.txt || true
+            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption|ANR in|Input dispatching" work/logcat.txt > work/crash_lines.txt || true
             head -40 work/activities.txt || true
 
       - name: Verdict
@@ -148,6 +154,8 @@ jobs:
           grep -E "mCurrentFocus|mFocusedApp" work/windows.txt 2>/dev/null | head -3 || echo "(no focus)"
           echo "== crash lines =="
           cat work/crash_lines.txt 2>/dev/null || echo "(none)"
+          echo "== main thread traces (SIGQUIT ANR dumps) =="
+          grep -B 1 -A 16 '"main"' work/anr_traces.txt 2>/dev/null | head -42 || echo "(no trace)"
           echo "== summary =="
           # v5 (run 34166250339) exposed a FALSE-POSITIVE 'BOOT OK': the main
           # thread died at App.onCreate:139 -> Aria.init -> SqlHelper.getDb
@@ -178,6 +186,13 @@ jobs:
           elif grep -q "APP_DEAD" work/alive2.txt 2>/dev/null; then
             echo "::error::app process is NOT alive at t=85s and main thread did not crash visibly - see artifacts"
             exit 1
+          fi
+          if grep -q "AM_START_TIMEOUT" work/am_start.txt 2>/dev/null; then
+            echo "::notice::RESEARCH OUTCOME - LAUNCH HANG: the r4 de-natify removed every class-load crash (no"
+            echo "::notice::VerifyError, no UnsatisfiedLinkError, no Ranger NPE); the process is alive but the"
+            echo "::notice::SplashAty launch never completes within 90 s. The SIGQUIT thread dumps in the"
+            echo "::notice::'main thread traces' section above name the exact parked frame chain - that is the"
+            echo "::notice::next de-natify layer to fix (await on a stubbed callback / SDK wait / lock)."
           fi
           FOCUS_OK=0
           grep -qE "mCurrentFocus.*(youcinemobile|com\.mobile\.brasiltv)" work/windows.txt 2>/dev/null && FOCUS_OK=1
