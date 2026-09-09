@@ -128,6 +128,10 @@ KEEP_PREFIXES = (
     # raizlabs, loopj, lzy, autosize, com.mobile.*) stay stubbed: no
     # shipped lib ever binds them.
     "Lorg/android/spdy/",
+    "Lorg/android/netutil/",                     # libtnet-3.1.14.so - the lib's FindClass
+                                                 # table also carries
+                                                 # org/android/netutil/UdpConnectType
+                                                 # (strings-confirmed in the shipped so)
     "Lcom/umeng/umzid/",
     "Lcom/uc/crashsdk/",
     "Ltv/danmaku/ijk/",
