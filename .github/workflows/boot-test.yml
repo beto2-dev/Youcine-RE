@@ -137,7 +137,7 @@ jobs:
             adb shell "cat /data/anr/*.txt 2>/dev/null" > work/anr_traces.txt 2>/dev/null || true
             adb shell "run-as $APP_ID ls files 2>/dev/null" > work/data_ls.txt 2>/dev/null || true
             grep -c "com.mobile.brasiltv" work/activities.txt > work/real_app_refs.txt || echo 0 > work/real_app_refs.txt || true
-            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption|ANR in|Input dispatching" work/logcat.txt > work/crash_lines.txt || true
+            grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption|ANR in|Input dispatching|Fatal signal|SIGSEGV|SIGABRT|SIGBUS|Fatal error|libc:" work/logcat.txt > work/crash_lines.txt || true
             head -40 work/activities.txt || true
 
       - name: Verdict
