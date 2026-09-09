@@ -158,6 +158,16 @@ KILL_CLASSES = (
 SHIELD_RUN_CLASSES = (
     "Lcom/titan/ranger/NativeJni$v;",   # run() NPEs on the null stub result
 )
+# PREFIX-SHIELD: every com.titan.ranger.NativeJni$* runnable ($a..$a0) - all
+# of them dereference the now-null NativeJni statics, and only $v ever got to
+# crash in a boot test; shielding the whole family costs nothing (the wrapper
+# swallows Throwable and the thread survives).  xref correction: the SDK is
+# NOT self-contained - g9.s0/g9.q call NativeJni 115+ times and
+# App.onCreate:128 -> g9.s0.n0 -> JniHandler.j, so the runnables may well be
+# posted from more than one path.
+SHIELD_RUN_PREFIXES = (
+    "Lcom/titan/ranger/NativeJni$",
+)
 
 # Built-in framework ctor table used when --framework-ctors is not given
 # (the CI build extracts the authoritative table from android.jar; this
@@ -641,7 +651,7 @@ def patch_smali_file(path: Path, bodies: dict, report: dict,
     cls_desc = cls_m.group(1) if cls_m else "L?;"
     guarded = cls_desc in GUARD_CLASSES
     killed = cls_desc in KILL_CLASSES
-    shielded = cls_desc in SHIELD_RUN_CLASSES
+    shielded = cls_desc in SHIELD_RUN_CLASSES or cls_desc.startswith(SHIELD_RUN_PREFIXES)
     ctor_stub = cls_desc in bad_ctor_classes
     out: list[str] = []
     i = 0
@@ -906,6 +916,7 @@ def main() -> int:
     full_report = {"dexes": [], "policy": {
         "keep_prefixes": list(KEEP_PREFIXES),
         "shield_run_classes": list(SHIELD_RUN_CLASSES),
+        "shield_run_prefixes": list(SHIELD_RUN_PREFIXES),
         "kill_classes": list(KILL_CLASSES),
         "bodies_file": str(args.bodies),
         "framework_ctors": str(args.framework_ctors or "<builtin>"),
@@ -933,7 +944,8 @@ def main() -> int:
                          or cls_desc in GUARD_CLASSES
                          or cls_desc in KILL_CLASSES
                          or cls_desc in bad_ctor_classes
-                         or cls_desc in SHIELD_RUN_CLASSES)
+                         or cls_desc in SHIELD_RUN_CLASSES
+                         or cls_desc.startswith(SHIELD_RUN_PREFIXES))
                 if not needs:
                     continue
                 patch_smali_file(smali, bodies, report, cmap.supers,
