@@ -104,16 +104,38 @@ jobs:
             adb install -r -g work/test.apk || true
             adb shell "dumpsys package $APP_ID | grep -iE 'primaryCpuAbi' | head -2" || true
             adb logcat -c || true
-            adb shell am start -W -n $APP_ID/$LAUNCH > work/am_start.txt 2>&1 || true
+            # timeout around -W: the phase-3 builds no longer crash at
+            # class-load - the launch can HANG instead (run 34292764876:
+            # am start -W blocked 48 min until the job timeout).  A hung
+            # launch must become evidence, not a stuck job.
+            timeout 90 adb shell am start -W -n $APP_ID/$LAUNCH > work/am_start.txt 2>&1 || echo "AM_START_TIMEOUT: launch never completed (app hung, not crashed)" >> work/am_start.txt
+            # kill -3 (SIGQUIT) = full ANR thread dump of every Java
+            # thread -> logcat: WHERE the main thread is parked
+            PID=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}')
+            if [ -n "$PID" ] && [ "$PID" != "APP_DEAD" ]; then
+              adb shell kill -3 $PID || true
+              sleep 5 || true
+            fi
             sleep 40 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive1.txt || true
             adb shell dumpsys activity activities > work/activities.txt 2>/dev/null || true
             adb exec-out screencap -p > work/boot_t40.png 2>/dev/null || true
+            # second thread dump right before the evidence capture: a
+            # park that moved between the two dumps = real deadlock,
+            # identical frames = single blocked launch
+            PID2=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}')
+            if [ -n "$PID2" ] && [ "$PID2" != "APP_DEAD" ]; then
+              adb shell kill -3 $PID2 || true
+              sleep 5 || true
+            fi
             sleep 45 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive2.txt || true
             adb shell dumpsys window windows > work/windows.txt 2>/dev/null || true
             adb exec-out screencap -p > work/boot_t85.png 2>/dev/null || true
             adb logcat -d -b main,system,crash > work/logcat.txt 2>/dev/null || true
+            # the SIGQUIT thread dumps also land in /data/anr/
+            adb shell "cat /data/anr/*.txt 2>/dev/null" > work/anr_traces.txt 2>/dev/null || true
+            adb shell "run-as $APP_ID ls files 2>/dev/null" > work/data_ls.txt 2>/dev/null || true
             grep -c "com.mobile.brasiltv" work/activities.txt > work/real_app_refs.txt || echo 0 > work/real_app_refs.txt || true
             grep -E "FATAL|AndroidRuntime|ijiami|s\.h\.e\.l\.l|UnsatisfiedLink|YoucineRE|DETool|System\.exit|libijmDataEncryption" work/logcat.txt > work/crash_lines.txt || true
             head -40 work/activities.txt || true
