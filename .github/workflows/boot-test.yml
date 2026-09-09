@@ -195,7 +195,12 @@ jobs:
             echo "::notice::next de-natify layer to fix (await on a stubbed callback / SDK wait / lock)."
           fi
           FOCUS_OK=0
-          grep -qE "mCurrentFocus.*(youcinemobile|com\.mobile\.brasiltv)" work/windows.txt 2>/dev/null && FOCUS_OK=1
+          # mCurrentFocus lives in 'dumpsys activity activities' output on
+          # API 30 ('dumpsys window windows' stopped carrying it) - grep
+          # both files or a REALLY booted app reads focus=0 (run 34302418568:
+          # DMCAAty resumed+mCurrentFocus+mFocusedApp, alive 85 s, 0 FATAL,
+          # reported 'focus=0' because the grep only read windows.txt)
+          grep -qE "mCurrentFocus.*(youcinemobile|com\.mobile\.brasiltv)" work/windows.txt work/activities.txt 2>/dev/null && FOCUS_OK=1
           RESUMED_OK=0
           grep -qE "ResumedActivity.*com\.mobile\.brasiltv|topResumedActivity.*com\.mobile\.brasiltv|mFocusedApp.*youcinemobile" work/activities.txt work/windows.txt 2>/dev/null && RESUMED_OK=1
           if [ "$MAIN_ALIVE" = "1" ] && [ "$RESUMED_OK" = "1" ] && [ "$FOCUS_OK" = "1" ]; then
