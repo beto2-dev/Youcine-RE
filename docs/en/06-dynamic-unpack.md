@@ -490,3 +490,63 @@ natives remaining == exactly the KEEP set, super-less ctors remaining
 Totals: 8 REAL + 778 stubbed natives, 19 kept, 1 guarded clinit, 1
 shielded thread, 6,529 ctor fixes (1,522 forward / 3,969 noarg /
 1,038 defaults / 0 left).
+
+### The r5-r8 chain to BOOT OK
+
+Each CI iteration peeled exactly one layer, the evidence machinery
+naming the next:
+
+* **r5** un-killed `JniHandler` (r4-beta had killed it): the app itself
+  drives it from `App.onCreate:128 -> g9.s0.n0 -> JniHandler.j` - the
+  obfuscated g9.* wrapper is the reference surface the earlier
+  com.titan.ranger-only xref missed.  Its materialized `<clinit>`
+  (no library load) initializes exactly the statics `j()` starts and
+  `k()` fills; killing it crash-looped the app at Application-create
+  while `am start -W` blocked on AMS respawning the dying process.
+* **r6** VENDOR-SYNTH: the first VMP wall on the UI path was
+  `SplashAty.configView()` (native; the presenter assignment).  Its
+  contract surface is fully materialized - `s6` (SplashPresenter)
+  carries real bodies, the activity implements `w5/h1`, `y4` iputs the
+  field - so the body was reconstructed (`s6(this, this) + y4`) into
+  `unpack/vendor_bodies.json`, applied as a new de-natify policy with
+  its own report counter (provenance: crash chain + contract
+  reconstruction - the 'registrar shim for the vendor's 424').
+* **r7** KEEP for the self-registering SDK natives: the umeng/accs/tnet
+  stack's own `libtnet` JNI_OnLoad RegisterNatives hit the de-natified
+  stubs and ART aborted ('No pending exception expected:
+  NoSuchMethodError: no native method org/android/spdy/SpdyAgent',
+  SIGABRT, process died TOP 3 s after a successful launch).  KEEP now
+  covers org/android/spdy, com/umeng/umzid, com/uc/crashsdk,
+  tv/danmaku/ijk (+ org/android/netutil) - families whose own libs
+  ship per-ABI in the APK; the packer-faked natives (hpplay/glide,
+  facebook, raizlabs, ...) stay stubbed.
+* **r8** LIFECYCLE SUPER: with spdy real, the splash flow ran end to
+  end (deeplink check -> jump) and reached `DMCAAty` - which died on
+  `SuperNotCalledException` because its de-natified `onCreate` stub
+  skipped the framework-required super call.  96
+  onCreate/onDestroy/onPostCreate overrides in Activity/Fragment
+  descendants (native stubs and extraction stubs alike) got
+  `invoke-super` prepended - the chain resolves level by level into
+  the materialized base classes.
+
+### BOOT OK (runs 34302418568 + 34302915196)
+
+The strict verdict (born from the v5 false-positive post-mortem: main
+thread alive + resumed activity + focused youcinemobile window) now
+passes: same pid at t=40 s and t=85 s, `am start` ok (1.8 s), the real
+flow SplashAty -> DMCAAty (the first-run disclaimer screen), the DMCA
+activity resumed AND holding mCurrentFocus, ZERO FATAL exceptions in
+the whole logcat.  The focus grep itself needed a fix - on API 30
+`mCurrentFocus` moved from `dumpsys window windows` to
+`dumpsys activity activities` output, and run 34302418568 was really
+booted while reporting focus=0.
+
+The packer-free, re-signed research build of YouCine 1.17.6 boots its
+real UI.  The remaining research caveat, stated plainly: the ~600
+un-materialized bodies are still silent stubs and the ~424 vendor VMP
+natives are stubs or reconstructions - the DMCA screen renders and
+holds the window, but deeper interactions ride on whatever the
+materialization coverage of the phase-2 dump happens to be.  Full
+semantic fidelity would need the packer engine's own registered
+bodies; a bootable, CI-verified research build is the deliverable the
+pipeline was built to produce.

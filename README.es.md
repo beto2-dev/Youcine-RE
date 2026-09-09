@@ -116,9 +116,11 @@ prefs) antes de `Application.onCreate` - incluido el rescate de ABI bajo
 ndk_translation - el kill-switch de firma embebido (`ConfusionUtils.cc`)
 queda neutralizado por cirugia DEX minima, y el proceso recorre todas las
 capas no protegidas hasta el primer metodo VMP de iJiami
-(`SqlHelper.getDb`). El boot completo es imposible sin el motor del
-packer con gate de contenido: los ~805 cuerpos ACC_NATIVE y los ~45k
-stubs de extraccion solo los materializa libexec en runtime. Ver el
+(`SqlHelper.getDb`) - ese era el estado antes de la fase 3. El puente
+de-natify de fase 3 (r4-r8: super-llamadas de ctor resueltas, cuerpos
+vendor-synth, natives auto-registrados conservados, super-llamadas de
+lifecycle) cerro despues esa brecha: el veredicto estricto BOOT OK ya
+pasa en el build booteable (UI real resumida Y enfocada, cero FATAL). Ver el
 veredicto corregido en
 [docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
 
@@ -250,6 +252,31 @@ left). El workflow **Booteable research APK** corre toda la cadena en
 CI y el boot test encadenado reporta el veredicto. SOLO PARA
 INVESTIGACION.
 
+### r5-r8 y el primer BOOT OK de la historia del proyecto
+
+Cuatro iteraciones de CI mas pelaron las capas restantes: la r5
+des-kill-eo `JniHandler` (la app lo maneja desde `App.onCreate:128`
+a traves del wrapper ofuscado g9.*); la r6 agrego la politica
+VENDOR-SYNTH (`unpack/vendor_bodies.json`) - cuerpos reconstruidos
+para los natives VMP del camino de arranque, empezando por
+`SplashAty.configView = s6(this,this) + y4` (el contrato del
+presenter esta totalmente materializado); la r7 extendio KEEP a los
+natives de SDKs auto-registrados (org/android/spdy, com/umeng/umzid,
+com/uc/crashsdk, tv/danmaku/ijk) cuyas libs propias hacen
+RegisterNatives al cargar - stubearlos hacia que ART abortara con
+'NoSuchMethodError: no native method'; la r8 antepuso el
+`invoke-super` exigido por el framework a 96 overrides stub de
+onCreate/onDestroy/onPostCreate (SuperNotCalledException si no).
+Resultado (boot tests 34302418568 + 34302915196): **BOOT OK - la UI
+real de YouCine (SplashAty -> DMCAAty) resumida Y enfocada, hilo
+principal vivo en t=85 s, cero excepciones FATAL** - el veredicto
+estricto introducido tras el falso-positivo v5. Salvedad de
+investigacion: los ~600 cuerpos sin materializar y los ~424 natives
+VMP del vendor son stubs o reconstrucciones - la UI arranca y
+sostiene, la semantica profunda monta sobre la cobertura de
+materializacion de la fase 2. Metodologia completa en
+[docs/es/06-unpack-dinamico.md](docs/es/06-unpack-dinamico.md).
+
 ## Documentacion
 
 Tabla equivalente en [README.md](README.md). Mapa maquina:
@@ -263,7 +290,7 @@ Tabla equivalente en [README.md](README.md). Mapa maquina:
 | `dumps-1.17.6` | DEX pristinos del dump fase 1 (checksums reparados) |
 | `phase2-1.17.6` | Evidencia fase 2: snapshots del re-dump, jni_table, imagenes de modulos |
 | `unpacked-1.17.6` | APK de investigacion sin shell iJiami (DEX fase 1, cuerpos stub) |
-| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados + de-natify r4 fase 3 (descifrado estatico + inyeccion de super-llamada en ctors + blindaje de hilo), resultado verificado por boot test** |
+| `booteable-1.17.6` | **APK booteable de investigacion: DEX fase 2 materializados + de-natify r4-r8 - BOOT OK (UI real SplashAty->DMCAAty resumida Y enfocada, cero FATAL)** |
 
 ## Legal
 

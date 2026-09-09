@@ -241,6 +241,29 @@ genuine JNI, 1 guarded `<clinit>`, 1 shielded thread, 6,529 ctor fixes
 **Booteable research APK** workflow runs the whole chain in CI and the
 chained boot test reports the verdict. RESEARCH USE ONLY.
 
+### r5-r8 and the first BOOT OK in the project's history
+
+Four more CI iterations peeled the remaining layers: r5 un-killed
+`JniHandler` (the app drives it from `App.onCreate:128` through the
+obfuscated g9.* wrapper); r6 added the VENDOR-SYNTH policy
+(`unpack/vendor_bodies.json`) - reconstructed bodies for the
+boot-path VMP natives, starting with `SplashAty.configView =
+s6(this,this) + y4` (the presenter contract is fully materialized);
+r7 extended KEEP to the self-registering SDK natives
+(org/android/spdy, com/umeng/umzid, com/uc/crashsdk,
+tv/danmaku/ijk) whose own libs RegisterNatives at load - stubbing
+those made ART abort with 'NoSuchMethodError: no native method'; r8
+prepended the framework-required `invoke-super` to 96 stubbed
+onCreate/onDestroy/onPostCreate overrides (SuperNotCalledException
+otherwise).  Result (boot-test runs 34302418568 + 34302915196):
+**BOOT OK - the real YouCine UI (SplashAty -> DMCAAty) resumed AND
+focused, main thread alive at t=85 s, zero FATAL exceptions** - the
+strict verdict introduced after the v5 false-positive.  Research
+caveat: the ~600 un-materialized bodies and ~424 vendor VMP natives
+are stubs or reconstructions - the UI boots and holds, deeper
+semantics ride on the phase-2 materialization coverage.  Full
+methodology in [docs/en/06-dynamic-unpack.md](docs/en/06-dynamic-unpack.md).
+
 ## Documentation
 
 | EN | ES |
@@ -264,7 +287,7 @@ Machine-readable map: `evidence/findings.json`. Stub sources from Jadx:
 | `dumps-1.17.6` | Pristine phase-1 dump DEXes (checksum-repaired) |
 | `phase2-1.17.6` | Phase-2 evidence: re-dump snapshots, jni_table, module images |
 | `unpacked-1.17.6` | Research APK with iJiami shell removed (phase-1 DEXes, stub bodies) |
-| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes + phase-3 de-natify r4 (static decryption + ctor super-call injection + thread shield), boot-test verified outcome** |
+| `booteable-1.17.6` | **Booteable research APK: phase-2 materialized DEXes + phase-3 de-natify r4-r8 - BOOT OK (real UI SplashAty->DMCAAty resumed AND focused, zero FATAL)** |
 
 ## Legal
 
