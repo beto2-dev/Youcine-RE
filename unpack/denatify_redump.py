@@ -110,11 +110,27 @@ from pathlib import Path
 # policy tables
 # ---------------------------------------------------------------------------
 KEEP_PREFIXES = (
-    # genuine JNI: their own .so ships in the rebuilt APK and registers them
+    # genuine JNI: their own .so ships in the rebuilt APK and registers
+    # them via JNI_OnLoad at System.loadLibrary time
     "Lcom/google/firebase/crashlytics/ndk/",
     "Lcom/ijm/dataencryption/",
     "Lcom/efs/sdk/",
     "Lcom/hpplay/component/protocol/encrypt/ED25519Encode",  # covers ...Encrypt and ...Encrypt2
+    # r7: the tnet/spdy, umeng-zid, uc-crashsdk and ijkplayer families.
+    # Their own libs (libtnet, libumeng-spy, libcrashsdk, libijkplayer)
+    # ship per-ABI in the APK and self-register - stubbing the Java
+    # declarations turns that registration into a runtime abort
+    # (boot-test 34299472156, umeng v$4 -> ACCSManager -> SessionCenter
+    # -> SpdyAgent -> SoInstallMgrSdk.initSo -> nativeLoad:
+    # 'No pending exception expected: NoSuchMethodError: no native
+    # method org/android/spdy/SpdyAgent' -> SIGABRT, process dies TOP).
+    # The natives the PACKER itself faked (hpplay/glide, facebook,
+    # raizlabs, loopj, lzy, autosize, com.mobile.*) stay stubbed: no
+    # shipped lib ever binds them.
+    "Lorg/android/spdy/",
+    "Lcom/umeng/umzid/",
+    "Lcom/uc/crashsdk/",
+    "Ltv/danmaku/ijk/",
 )
 
 # GUARD: wrap the <clinit> of these classes in a try/catch so a loadLibrary
