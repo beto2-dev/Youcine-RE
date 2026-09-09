@@ -134,14 +134,21 @@ GUARD_CLASSES = (  # empty since r4: NativeJni moved to KILL_CLASSES
 # alive, but its JNI_OnLoad had ALREADY started the handlerRanger
 # thread before rejecting the re-signed certificate, and the clinit
 # aborted at the throw point - the posted runnable then read a null
-# static and NPE'd.  A cross-DEX xref scan of all 5 winners (invokes +
-# static field ops + const-strings) shows NO class outside
-# com.titan.ranger.* ever references the SDK, so killing the class-init
-# prevents the thread from starting at all with zero app-side side
-# effects.
+# static and NPE'd.  Killing the class-init prevents the thread from
+# starting at all.
+#
+# JniHandler is deliberately NOT killed (boot-test 34297259155): its
+# <clinit> is materialized, loads NO library, and initializes exactly
+# the statics the app itself drives from App.onCreate:128 ->
+# g9.s0.n0 -> JniHandler.j (HandlerThread.start) and the handlerTitan
+# thread's JniHandler.k (array write).  Killing it nulls those fields
+# and crash-loops the app at Application onCreate - am start -W then
+# blocks while AMS keeps respawning the dying process (that was the
+# 48-minute 'hang' of run 34292764876).  The obfuscated g9.* wrapper
+# package - NOT com.titan.ranger.* - is the reference surface the
+# earlier xref scan missed.
 KILL_CLASSES = (
     "Lcom/titan/ranger/NativeJni;",
-    "Lcom/titan/ranger/JniHandler;",
 )
 
 # SHIELD: rename-wrap run()V of these classes so an uncaught Throwable on
