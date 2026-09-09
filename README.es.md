@@ -298,3 +298,23 @@ Investigacion educativa: analisis de packer, metodologia de malware-analysis,
 clasificacion de SDKs. No se distribuye contenido audiovisual, no se eluden
 entitlements de pago y no se publica el bytecode original del vendor.
 Ver [docs/es/07-legal.md](docs/es/07-legal.md).
+
+## Hasta aqui nuestra investigacion (2026-09-09)
+
+Muchisimas gracias a **ChapzoMods** por apoyar tanto este proyecto - las
+iteraciones r4-r8 y la maquinaria de evidencia del boot-test fueron trabajo
+de los dos, y este hito es tan suyo como mio.
+
+Ya completamos lo que queriamos: **desempaquetar la APK y lograr que al
+menos corra, aunque no completamente**. El build `booteable-1.17.6` arranca
+la UI real de YouCine (BOOT OK, cero excepciones FATAL) con el packer
+eliminado por completo; la funcionalidad mas profunda depende de la
+cobertura de materializacion documentada arriba, y ahi la dejamos.
+
+Si alguien quiere tomar este codigo para modificarlo, extenderlo o
+continuar la investigacion, por favor siga las reglas de la licencia
+(GNU GPL 3.0 - ver `LICENSE` y [docs/es/07-legal.md](docs/es/07-legal.md)).
+
+Muchas gracias a todos.
+
+— beto2-dev

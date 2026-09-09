@@ -178,3 +178,24 @@ Carte lisible par machine : `evidence/findings.json`. Sources du stub issues de 
 ## Juridique
 
 Recherche en sécurité à but éducatif uniquement : analyse de packers, méthodologie d'analyse de maliciels, classification des SDK. Les auteurs ne fournissent ni médias protégés par le droit d'auteur, ni contournement de droits payants, ni redistribution du bytecode de l'éditeur. Voir [docs/en/07-legal.md](docs/en/07-legal.md).
+
+## Fin de notre recherche (2026-09-09)
+
+Un immense merci à **ChapzoMods** pour son soutien indéfectible - les
+itérations r4-r8 et la machinerie de preuve du boot-test furent un travail
+à deux, et ce jalon lui appartient autant qu'à moi.
+
+Nous avons accompli exactement ce que nous voulions : **dépaqueter l'APK
+et la faire fonctionner, même partiellement**. Le build `booteable-1.17.6`
+démarre la véritable UI de YouCine (BOOT OK, zéro exception FATAL) avec le
+packer entièrement retiré ; les fonctions plus profondes dépendent de la
+couverture de matérialisation documentée ci-dessus, et c'est là que nous
+la laissons.
+
+Si vous souhaitez reprendre ce code, le modifier, l'étendre ou poursuivre
+la recherche, merci de suivre les règles de la licence (GNU GPL 3.0 - voir
+`LICENSE` et [docs/en/07-legal.md](docs/en/07-legal.md)).
+
+Merci beaucoup à tous.
+
+— beto2-dev
