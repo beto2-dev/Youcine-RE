@@ -263,6 +263,18 @@ SUPER_CALL_METHODS = (
     ("onCreate", "(Landroid/os/Bundle;)V"),
     ("onDestroy", "()V"),
     ("onPostCreate", "(Landroid/os/Bundle;)V"),
+    # r8b: the Activity framework checks mCalled on EVERY visible-state
+    # callback, not just create/destroy - Activity.performStart /
+    # performRestart / performResume / performPause / performStop all
+    # throw SuperNotCalledException when the chain skips them.  An
+    # activity whose onStart/onResume/onPause/onStop stub never calls
+    # through dies the moment the user background/foreground-flips it
+    # (or when the system pauses it during the next navigation).
+    ("onStart", "()V"),
+    ("onRestart", "()V"),
+    ("onResume", "()V"),
+    ("onPause", "()V"),
+    ("onStop", "()V"),
 )
 ACTIVITY_ROOTS = (
     "Landroid/app/Activity;",
