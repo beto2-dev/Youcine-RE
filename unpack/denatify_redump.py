@@ -250,6 +250,53 @@ ACC_PUBLIC = 0x1
 ACC_PRIVATE = 0x2
 ACC_PROTECTED = 0x4
 
+# r8: framework-checked lifecycle overrides.  Activity.performCreate
+# (and the fragment equivalents) enforce SuperNotCalledException when the
+# leaf class's onCreate/onDestroy chain never reaches the framework's
+# implementation - a stub body that skips the super call kills the launch
+# AFTER it already succeeded (boot-test 34301024615: SplashAty jumped to
+# DMCAAty - the REAL app flow - and DMCAAty.onCreate, de-natified to a
+# bare return-void, tripped 'did not call through to super.onCreate').
+# Every level of a stubbed chain needs the call, so this applies to native
+# de-natify stubs AND non-native extraction stubs alike.
+SUPER_CALL_METHODS = (
+    ("onCreate", "(Landroid/os/Bundle;)V"),
+    ("onDestroy", "()V"),
+    ("onPostCreate", "(Landroid/os/Bundle;)V"),
+)
+ACTIVITY_ROOTS = (
+    "Landroid/app/Activity;",
+    "Landroidx/appcompat/app/AppCompatActivity;",
+    "Landroid/app/Fragment;",
+    "Landroidx/fragment/app/Fragment;",
+    "Landroidx/fragment/app/DialogFragment;",
+)
+
+
+def is_activity_descendant(cls: str, supers: dict) -> bool:
+    seen = set()
+    cur = cls
+    while cur and cur not in seen and cur in supers:
+        seen.add(cur)
+        cur = supers[cur]
+        if cur in ACTIVITY_ROOTS:
+            return True
+    return False
+
+
+def lifecycle_super_snippet(name: str, proto: str, cls: str,
+                            supers: dict) -> str | None:
+    """invoke-super line for a framework-checked lifecycle override."""
+    sup = supers.get(cls)
+    if not sup or sup in ("Ljava/lang/Object;", ""):
+        return None
+    words = 1 + _proto_words(proto)
+    if words > 5:
+        return None
+    regs = ["p0", "p1"] if _proto_words(proto) else ["p0"]
+    return (f"    invoke-super {{{', '.join(regs)}}}, "
+            f"{sup}->{name}{proto}\n")
+
 # ---------------------------------------------------------------------------
 # DEX class-map: supers, ctor protos, super-less stub ctors (phase-3 r4)
 # ---------------------------------------------------------------------------
@@ -277,6 +324,9 @@ class DexClassMap:
         self.ctor_protos: dict[str, list[tuple[str, int]]] = {}
         self.bad_ctors: list[tuple[str, str]] = []
         self.bad_ctors_per_dex: dict[str, list[tuple[str, str]]] = {}
+        # r8: classes whose onCreate/onDestroy/onPostCreate override has a
+        # stub body without the framework-required super call
+        self.lifecycle_stub_classes: set[str] = set()
         for p in dex_paths:
             self._ingest(p)
 
@@ -361,6 +411,14 @@ class DexClassMap:
                     flags, off = _uleb(d, off)
                     code_off, off = _uleb(d, off)
                     _, name, proto = method_info(prev_m)
+                    if (name, proto) in SUPER_CALL_METHODS and \
+                            not (flags & 0x0100) and \
+                            not body_calls_ctor(code_off):
+                        # r8: non-native lifecycle override whose stub body
+                        # lacks the framework-required super call
+                        # (body_calls_ctor doubles as the has-invoke-super
+                        # probe: opcodes 0x6f/0x70/0x75/0x76)
+                        self.lifecycle_stub_classes.add(cls)
                     if name != "<init>":
                         continue
                     protos.append((proto, flags))
@@ -781,6 +839,18 @@ def patch_smali_file(path: Path, bodies: dict, report: dict,
             i = j + 1
             continue
 
+        # ---- LIFECYCLE SUPER FIX: framework-checked overrides ----
+        # a stub onCreate/onDestroy in an Activity/Fragment descendant
+        # must still call through to super or the launch dies at
+        # performCreate with SuperNotCalledException
+        super_required = ((name, proto) in SUPER_CALL_METHODS
+                          and is_activity_descendant(cls_desc, supers)
+                          and lifecycle_super_snippet(name, proto, cls_desc,
+                                                      supers) is not None)
+        super_missing = not re.search(
+            r"^\s*invoke-super(?:/range)?\s+.*?->" + re.escape(name) + r"\(",
+            block_text, re.M) if block_text else True
+
         # ---- CTOR-STUB FIX (non-native): prepend the super call ----
         if not is_native and name == "<init>" and ctor_stub \
                 and not INVOKE_INIT_RE.search(block_text):
@@ -810,6 +880,20 @@ def patch_smali_file(path: Path, bodies: dict, report: dict,
                 report["ctorfix"]["left"].append(key)
             i = j + 1
             continue
+
+        # ---- LIFECYCLE SUPER FIX (non-native extraction stubs) ----
+        if not is_native and super_required and super_missing:
+            snippet = lifecycle_super_snippet(name, proto, cls_desc,
+                                              supers)
+            if snippet:
+                out.append(header)
+                out.append(snippet.rstrip("\n"))
+                out.append("")
+                out.extend(block)
+                out.append(end_line)
+                report["lifecycle"].append(key)
+                i = j + 1
+                continue
 
         # ---- native de-natify: KEEP / REAL / VENDOR-SYNTH / STUB ----
         if is_native:
@@ -847,6 +931,15 @@ def patch_smali_file(path: Path, bodies: dict, report: dict,
                     new_header = re.sub(r"\bnative\b\s*", "", header, count=1)
                 out.append(new_header)
                 out.append(f"    .locals {locals_n}")
+                if super_required:
+                    # the synthesized default body has no super call -
+                    # inject the framework-required invoke-super first
+                    snip = lifecycle_super_snippet(name, proto, cls_desc,
+                                                   supers)
+                    if snip:
+                        out.append(snip.rstrip("\n"))
+                        out.append("")
+                        report["lifecycle"].append(key)
                 out.extend(block)          # annotations, if any
                 out.append(body.rstrip("\n"))
                 out.append(end_line)
@@ -973,7 +1066,7 @@ def main() -> int:
         cls_pre, m_pre, n_pre = parse_dex_headers(dex)
         report = {"dex": dex.name, "real": [], "stub": [],
                   "keep": [], "guard": [], "shield": [], "kill": [],
-                  "vendor": [],
+                  "vendor": [], "lifecycle": [],
                   "ctorfix": {"forward": [], "noarg": [], "defaults": [],
                               "left": []}}
         with tempfile.TemporaryDirectory(prefix="denatify_") as td:
@@ -991,6 +1084,7 @@ def main() -> int:
                          or cls_desc in GUARD_CLASSES
                          or cls_desc in KILL_CLASSES
                          or cls_desc in bad_ctor_classes
+                         or cls_desc in cmap.lifecycle_stub_classes
                          or cls_desc in SHIELD_RUN_CLASSES
                          or cls_desc.startswith(SHIELD_RUN_PREFIXES))
                 if not needs:
@@ -1016,6 +1110,7 @@ def main() -> int:
             "bad_ctors_out": len(out_cmap.bad_ctors),
             "real": len(report["real"]),
             "vendor": len(report["vendor"]),
+            "lifecycle": len(report["lifecycle"]),
             "stub": len(report["stub"]),
             "keep": len(report["keep"]),
             "guard": len(report["guard"]),
@@ -1031,6 +1126,7 @@ def main() -> int:
               f"stub={entry['stub']} "
               f"keep={entry['keep']} guard={entry['guard']} "
               f"shield={entry['shield']} kill={entry['kill']} "
+              f"lifecycle={entry['lifecycle']} "
               f"ctorfix(f/n/d)={entry['ctorfix_forward']}/"
               f"{entry['ctorfix_noarg']}/{entry['ctorfix_defaults']} "
               f"left={entry['ctorfix_left']} "
@@ -1066,6 +1162,7 @@ def main() -> int:
     full_report["totals"] = {
         "real": sum(d["real"] for d in full_report["dexes"]),
         "vendor": sum(d["vendor"] for d in full_report["dexes"]),
+        "lifecycle": sum(d["lifecycle"] for d in full_report["dexes"]),
         "stub": sum(d["stub"] for d in full_report["dexes"]),
         "keep": sum(d["keep"] for d in full_report["dexes"]),
         "guard": sum(d["guard"] for d in full_report["dexes"]),
@@ -1090,6 +1187,7 @@ def main() -> int:
           f"stubbed={t['stub']} "
           f"kept-native={t['keep']} guarded-clinit={t['guard']} "
           f"shielded-run={t['shield']} killed-clinit={t['kill']} "
+          f"lifecycle-super={t['lifecycle']} "
           f"ctorfix(f/n/d/l)={t['ctorfix_forward']}/{t['ctorfix_noarg']}/"
           f"{t['ctorfix_defaults']}/{t['ctorfix_left']} "
           f"-> {out_dir}", flush=True)
