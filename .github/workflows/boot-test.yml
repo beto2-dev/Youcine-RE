@@ -110,12 +110,10 @@ jobs:
             # launch must become evidence, not a stuck job.
             timeout 90 adb shell am start -W -n $APP_ID/$LAUNCH > work/am_start.txt 2>&1 || echo "AM_START_TIMEOUT: launch never completed (app hung, not crashed)" >> work/am_start.txt
             # kill -3 (SIGQUIT) = full ANR thread dump of every Java
-            # thread -> logcat: WHERE the main thread is parked
-            PID=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}')
-            if [ -n "$PID" ] && [ "$PID" != "APP_DEAD" ]; then
-              adb shell kill -3 $PID || true
-              sleep 5 || true
-            fi
+            # thread -> logcat: WHERE the main thread is parked.
+            # NOTE: android-emulator-runner runs EACH LINE in its own
+            # sh -c (run 34046564135) - control flow must stay one-line.
+            PID=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}'); if [ -n "$PID" ] && [ "$PID" != "APP_DEAD" ]; then adb shell kill -3 $PID || true; sleep 5 || true; fi
             sleep 40 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive1.txt || true
             adb shell dumpsys activity activities > work/activities.txt 2>/dev/null || true
@@ -123,11 +121,7 @@ jobs:
             # second thread dump right before the evidence capture: a
             # park that moved between the two dumps = real deadlock,
             # identical frames = single blocked launch
-            PID2=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}')
-            if [ -n "$PID2" ] && [ "$PID2" != "APP_DEAD" ]; then
-              adb shell kill -3 $PID2 || true
-              sleep 5 || true
-            fi
+            PID2=$(adb shell pidof $APP_ID | tr -d '\r' | awk '{print $1}'); if [ -n "$PID2" ] && [ "$PID2" != "APP_DEAD" ]; then adb shell kill -3 $PID2 || true; sleep 5 || true; fi
             sleep 45 || true
             adb shell "pidof $APP_ID || echo APP_DEAD" | tee work/alive2.txt || true
             adb shell dumpsys window windows > work/windows.txt 2>/dev/null || true
